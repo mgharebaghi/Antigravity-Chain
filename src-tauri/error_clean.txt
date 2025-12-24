@@ -1,0 +1,32 @@
+error[E0308]: mismatched types
+  --> src\p2p.rs:93:42
+   |
+93 |                 .set_protocol_names(vec![std::borrow::Cow::Borrowed(b"/antigravity/kad/1.0.0")]);
+   |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `StreamProtocol`, found `Cow<'_, [u8; 22]>`
+   |
+   = note: expected struct `StreamProtocol`
+                found enum `Cow<'_, [u8; 22]>`
+
+error[E0609]: no field `peers` on type `BootstrapOk`
+   --> src\p2p.rs:355:88
+    |
+355 | ...                   log::info!("DHT Bootstrap successful: found {} peers", ok.peers.len());
+    |                                                                                 ^^^^^ unknown field
+    |
+help: a field with a similar name exists
+    |
+355 -                              log::info!("DHT Bootstrap successful: found {} peers", ok.peers.len());
+355 +                              log::info!("DHT Bootstrap successful: found {} peers", ok.peer.len());
+    |
+
+warning: unused variable: `state`
+   --> src\lib.rs:325:27
+    |
+325 | async fn get_latest_block(state: State<'_, AppState>) -> Result<Option<chain::Block>, String> {
+    |                           ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+Some errors have detailed explanations: E0308, E0609.
+For more information about an error, try `rustc --explain E0308`.
+error: could not compile `tauri-appantigravity-chain` (lib) due to 2 previous errors; 1 warning emitted
