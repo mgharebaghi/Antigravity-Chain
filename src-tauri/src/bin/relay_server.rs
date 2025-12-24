@@ -16,7 +16,7 @@ struct RelayServerBehaviour {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    flexi_logger::Logger::try_with_str("info")?.start()?;
 
     // 1. Generate keys
     let local_key = identity::Keypair::generate_ed25519();

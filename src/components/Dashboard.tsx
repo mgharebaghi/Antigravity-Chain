@@ -1,303 +1,232 @@
-import { Activity, Zap, Layers, Pickaxe, RefreshCw, Shield, Info, Gauge } from 'lucide-react';
+import { Activity, Zap, Layers, Pickaxe, RefreshCw, Shield, Gauge, Globe, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
 import { motion } from 'framer-motion';
-import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { cn, formatPatience } from '../lib/utils';
-import PageTransition from './PageTransition';
 import { Link } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { formatNumber } from '../utils/format';
+// import { useTheme } from '../context/ThemeContext';
 
 export default function Dashboard() {
-    // Consume global state
     const { wallet, nodeStatus, patience, peers, startNode, stopNode, latestBlock, minedBlocks, vdfStatus } = useApp();
+    // Theme unused
+    // const { theme } = useTheme();
 
     const handleStartNodeClick = async () => {
         try {
             await startNode();
         } catch (e) {
-            // Already handled in context but could show toast here
             console.error(e);
         }
     };
 
     const handleRetry = async () => {
-        // first stop, then start
         await stopNode();
         setTimeout(() => startNode(), 2000);
     };
 
-    const isRunning = nodeStatus.startsWith('Active') || nodeStatus.includes('Syncing');
-
-    // In-progress states that are not "Active" but the service is STARTING/WORKING
-    const isStarting = nodeStatus.includes('Connecting') || nodeStatus.includes('Searching') || nodeStatus.includes('Creating');
-
-    // Explicit error or connection stuck
+    // const isRunning = nodeStatus.startsWith('Active') || nodeStatus.includes('Syncing');
     const isError = nodeStatus === "Relay Unreachable" || nodeStatus === "Connection Lost";
     const isActive = nodeStatus === "Active";
 
-    return (
-        <PageTransition>
-            <div className="flex flex-col min-h-full gap-3 sm:gap-6 pb-6">
-
-                {/* Status Section: Responsive grid */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 shrink-0">
-                    <Card className={cn(
-                        "bg-card/50 backdrop-blur-sm border-primary/20 transition-all hover:bg-card/80 shadow-lg min-h-0 flex flex-col",
-                        isError && "border-red-500/30 bg-red-500/5",
-                        isActive && "border-emerald-500/30 bg-emerald-500/5 shadow-emerald-500/5"
-                    )}>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1.5 sm:pb-2 pt-3 sm:pt-6">
-                            <CardTitle className="text-[10px] sm:text-sm font-medium uppercase tracking-wider text-muted-foreground/60">Node Status</CardTitle>
-                            <Activity className={cn("h-3.5 w-3.5 sm:h-4 sm:w-4",
-                                isActive ? "text-emerald-500 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]" :
-                                    isRunning ? "text-green-500" :
-                                        isError ? "text-red-500" : "text-muted-foreground"
-                            )} />
-                        </CardHeader>
-                        <CardContent className="pb-3 sm:pb-6">
-                            <div className={cn("font-bold leading-tight truncate",
-                                isError ? "text-red-500 text-base sm:text-xl" :
-                                    isActive ? "text-emerald-500 text-lg sm:text-2xl" : "text-lg sm:text-2xl"
-                            )}>
-                                {isError ? "Connection Failed" : nodeStatus}
-                            </div>
-                            <p className={cn("text-[9px] sm:text-xs mt-0.5 sm:mt-1 truncate",
-                                isError ? "text-red-400 font-medium" :
-                                    isActive ? "text-emerald-400 font-medium" : "text-muted-foreground"
-                            )}>
-                                {isRunning || isStarting ? (
-                                    <>
-                                        {peers > 0 ? `Connected to ${peers} peers` :
-                                            isActive ? "Synchronized & Secure" : "Searching for network..."}
-                                    </>
-                                ) : isError ? "Unable to reach relay network" : "Service is offline"}
-                            </p>
-                        </CardContent>
-                    </Card>
-
-                    <Card className="bg-card/50 backdrop-blur-sm border-primary/20 transition-all hover:bg-card/80 shadow-lg min-h-0 flex flex-col">
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1.5 sm:pb-2 pt-3 sm:pt-6">
-                            <CardTitle className="text-[10px] sm:text-sm font-medium uppercase tracking-wider text-muted-foreground/60">Block Height</CardTitle>
-                            <Layers className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent className="pb-3 sm:pb-6">
-                            <div className="text-lg sm:text-2xl font-bold font-mono leading-none">
-                                {latestBlock ? `#${formatNumber(latestBlock.index, false)}` : "-"}
-                            </div>
-                            <p className="text-[9px] sm:text-xs text-muted-foreground truncate mt-1">
-                                {latestBlock ? `Hash: ${latestBlock.hash.substring(0, 16)}...` : "Waiting for sync..."}
-                            </p>
-                        </CardContent>
-                    </Card>
-
-                    <Card className="bg-card/50 backdrop-blur-sm border-primary/20 transition-all hover:bg-card/80 shadow-lg sm:grid-cols-1 sm:col-span-2 lg:col-span-1 min-h-0 flex flex-col">
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1.5 sm:pb-2 pt-3 sm:pt-6">
-                            <CardTitle className="text-[10px] sm:text-sm font-medium uppercase tracking-wider text-muted-foreground/60">Mined Blocks</CardTitle>
-                            <Pickaxe className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent className="pb-3 sm:pb-6">
-                            <div className="text-lg sm:text-2xl font-bold text-primary leading-none">{formatNumber(minedBlocks, false)}</div>
-                            <p className="text-[9px] sm:text-xs text-muted-foreground truncate mt-1">
-                                {minedBlocks > 0
-                                    ? "Blocks confirmed by this node"
-                                    : "No blocks mined yet"}
-                            </p>
-                        </CardContent>
-                    </Card>
-
-                    <Card className={cn(
-                        "bg-card/50 backdrop-blur-sm border-primary/20 transition-all hover:bg-card/80 shadow-lg lg:col-span-3 border-l-4 min-h-0",
-                        vdfStatus?.is_active ? "border-l-emerald-500" : "border-l-muted"
-                    )}>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1.5 sm:pb-2 pt-3 sm:pt-4 px-4 sm:px-6">
-                            <div className="flex items-center gap-2">
-                                <CardTitle className="text-[10px] sm:text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground/60">Sybil Resistance Engine (VDF)</CardTitle>
-                                <div className="group relative hidden xs:block">
-                                    <Info className="h-3 w-3 text-muted-foreground/40 cursor-help transition-colors group-hover:text-primary" />
-                                    <div className="absolute left-0 bottom-full mb-2 w-64 p-3 bg-card border border-primary/20 rounded-xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all text-[10px] text-muted-foreground leading-relaxed z-50">
-                                        <p className="font-bold text-primary mb-1">What is Sybil Resistance?</p>
-                                        VDF prevents attackers from creating fake identities to manipulate the network. It requires a sequential "Proof of Patience" that cannot be parallelized, making the network fair for all nodes.
-                                    </div>
-                                </div>
-                            </div>
-                            <Shield className={cn("h-3.5 w-3.5 sm:h-4 sm:w-4 transition-colors",
-                                vdfStatus?.is_active ? "text-emerald-500" : "text-muted-foreground"
-                            )} />
-                        </CardHeader>
-                        <CardContent className="pb-3 sm:pb-4 px-4 sm:px-6">
-                            <div className="flex items-center justify-between gap-4">
-                                <div className="min-w-0">
-                                    <div className={cn("text-sm sm:text-lg font-black tracking-tight truncate flex items-center gap-2",
-                                        vdfStatus?.is_active ? "text-emerald-500" : "text-foreground"
-                                    )}>
-                                        {vdfStatus?.is_active ? (
-                                            <>
-                                                <Gauge className="w-3.5 h-3.5 sm:w-4 h-4" />
-                                                {formatNumber(vdfStatus.iterations_per_second, false)} <span className="text-[9px] sm:text-[10px] text-muted-foreground font-medium">H/s</span>
-                                            </>
-                                        ) : "Passive Protection"}
-                                    </div>
-                                    <p className="text-[8px] sm:text-[10px] font-medium text-muted-foreground uppercase tracking-widest mt-0.5">
-                                        {vdfStatus?.is_active ? "Protocol secure via sequential hashing" : "Engine awaiting node initialization"}
-                                    </p>
-                                </div>
-                                <div className="flex flex-col items-end shrink-0">
-                                    <span className="text-[7px] sm:text-[8px] font-black text-muted-foreground/50 uppercase tracking-tighter">Current Difficulty</span>
-                                    <span className="text-[10px] sm:text-xs font-mono font-extrabold text-primary/80">
-                                        {vdfStatus ? `${formatNumber(vdfStatus.difficulty, false)} SHA-256` : "200k SHA-256"}
-                                    </span>
-                                </div>
-                            </div>
-
-                            {/* Live Progress Bar Simulation */}
-                            {vdfStatus?.is_active && (
-                                <div className="mt-2 sm:mt-3 w-full h-1 bg-muted/20 rounded-full overflow-hidden">
-                                    <motion.div
-                                        animate={{ x: ['-100%', '100%'] }}
-                                        transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                                        className="w-1/3 h-full bg-primary/40 rounded-full"
-                                    ></motion.div>
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
+    const StatCard = ({ title, value, subValue, icon: Icon, statusColor, footerLabel, footerValue }: any) => (
+        <div className="glass-card p-6 rounded-2xl flex flex-col justify-between h-full group hover:bg-white/80 dark:hover:bg-black/50 transition-all duration-300">
+            <div className="flex justify-between items-start mb-4">
+                <div>
+                    <p className="text-sm font-medium text-muted-foreground">{title}</p>
+                    <div className="flex items-baseline gap-2 mt-2">
+                        <h3 className={cn("text-3xl font-bold tracking-tight", statusColor)}>
+                            {value}
+                        </h3>
+                        {subValue && <span className="text-xs text-muted-foreground">{subValue}</span>}
+                    </div>
                 </div>
+                <div className="p-2.5 bg-secondary/50 rounded-xl group-hover:scale-110 transition-transform duration-300">
+                    <Icon className="w-5 h-5 text-muted-foreground" />
+                </div>
+            </div>
+            {footerLabel && (
+                <div className="pt-4 border-t border-border/50 flex items-center justify-between text-xs sm:text-sm">
+                    <span className="text-muted-foreground">{footerLabel}</span>
+                    <span className="font-semibold px-2 py-0.5 rounded-lg bg-secondary/50">
+                        {footerValue}
+                    </span>
+                </div>
+            )}
+        </div>
+    );
 
-                {/* Visualizer Section: Flex Grow, Adaptive sizing */}
-                <Card className={cn("flex-1 min-h-0 relative overflow-hidden flex items-center justify-center border-primary/10 shadow-2xl transition-colors duration-1000",
-                    isError && "border-red-500/20 bg-red-950/20",
-                    isActive && "border-emerald-500/20 bg-emerald-950/10"
-                )}>
-                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-primary/10 via-transparent to-transparent pointer-events-none" />
+    return (
+        <div className="flex flex-col gap-6 sm:gap-8 pb-8">
 
-                    {isError && (
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-red-500/5 via-transparent to-transparent pointer-events-none" />
+            {/* Header Section */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-foreground">
+                        Dashboard
+                    </h1>
+                    <p className="text-muted-foreground mt-2 text-base max-w-2xl">
+                        Real-time overview of your node's performance, network participation, and consensus status.
+                    </p>
+                </div>
+                <div className="flex items-center gap-3">
+                    {!wallet ? (
+                        <Button asChild size="lg" className="gap-2 shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all">
+                            <Link to="/wallet">
+                                <Zap className="w-4 h-4" /> Initialize Wallet
+                            </Link>
+                        </Button>
+                    ) : (
+                        nodeStatus === "Stopped" ? (
+                            <Button onClick={handleStartNodeClick} size="lg" className="gap-2 shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all">
+                                <Zap className="w-4 h-4 fill-current" /> Start Node
+                            </Button>
+                        ) : (
+                            <Button variant="outline" className="gap-2 cursor-default bg-emerald-500/10 text-emerald-600 border-emerald-500/20 hover:bg-emerald-500/10">
+                                <span className="relative flex h-2.5 w-2.5 mr-1">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                                </span>
+                                Node Running
+                            </Button>
+                        )
                     )}
+                </div>
+            </div>
 
-                    {isActive && (
-                        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-emerald-500/10 via-transparent to-transparent pointer-events-none" />
-                    )}
+            {/* Status Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+                <StatCard
+                    title="Network Status"
+                    value={
+                        <span className="flex items-center gap-2 text-lg sm:text-2xl">
+                            {isError ? <AlertCircle className="w-5 h-5" /> : isActive ? <CheckCircle2 className="w-5 h-5" /> : <Activity className="w-5 h-5" />}
+                            {nodeStatus}
+                        </span>
+                    }
+                    icon={Globe}
+                    statusColor={isError ? "text-destructive" : isActive ? "text-emerald-500" : "text-foreground"}
+                    footerLabel="Peers Connected"
+                    footerValue={`${peers} Active`}
+                />
 
-                    <div className="relative z-10 text-center flex flex-col items-center justify-center gap-4 sm:gap-8 h-full w-full p-4 sm:p-10 min-h-0">
-                        {/* Visualizer: Adaptive size */}
-                        <div className="relative w-36 h-36 sm:w-64 sm:h-64 lg:w-72 lg:h-72 flex items-center justify-center shrink-0">
-                            {!isError ? (
-                                <>
-                                    <motion.div
-                                        animate={isRunning || isStarting ? { rotate: 360 } : {}}
-                                        transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
-                                        className={cn("absolute w-full h-full rounded-[40%] border",
-                                            isActive ? "border-emerald-500/30" : "border-primary/20"
-                                        )}
-                                    />
-                                    <motion.div
-                                        animate={isRunning || isStarting ? { rotate: -360 } : {}}
-                                        transition={{ duration: 15, repeat: Infinity, ease: "linear" }}
-                                        className={cn("absolute w-[85%] h-[85%] rounded-[35%] border",
-                                            isActive ? "border-emerald-500/50" : "border-primary/40"
-                                        )}
-                                    />
-                                    <motion.div
-                                        animate={isRunning || isStarting ? { scale: [1, 1.05, 1] } : {}}
-                                        transition={{ duration: 4, repeat: Infinity, ease: "easeInOut" }}
-                                        className={cn("absolute w-[70%] h-[70%] rounded-full border blur-[1px]",
-                                            isActive ? "bg-emerald-500/10 border-emerald-500/60" : "bg-primary/5 border-primary/60"
-                                        )}
-                                    />
-                                    {isActive && (
-                                        <motion.div
-                                            animate={{ scale: [1, 1.2, 1], opacity: [0.1, 0.3, 0.1] }}
-                                            transition={{ duration: 4, repeat: Infinity }}
-                                            className="absolute w-full h-full rounded-full bg-emerald-500/10 blur-3xl -z-10"
-                                        />
-                                    )}
-                                </>
-                            ) : (
-                                <div className="relative flex items-center justify-center">
-                                    <motion.div
-                                        animate={{ scale: [1, 1.1, 1] }}
-                                        transition={{ duration: 3, repeat: Infinity }}
-                                        className="absolute w-full h-full rounded-full bg-red-500/10 blur-3xl"
-                                    />
-                                    <div className="w-32 h-32 sm:w-40 sm:h-40 rounded-full border-2 border-dashed border-red-500/30 flex items-center justify-center relative">
-                                        <Activity className="w-16 h-16 sm:w-20 sm:h-20 text-red-500 drop-shadow-[0_0_15px_rgba(239,68,68,0.5)]" />
-                                        <div className="absolute inset-0 rounded-full border-2 border-red-500/5 animate-ping" />
-                                    </div>
-                                </div>
-                            )}
+                <StatCard
+                    title="Chain Height"
+                    value={latestBlock ? `#${formatNumber(latestBlock.index, false)}` : "Syncing..."}
+                    icon={Layers}
+                    footerLabel="Latest Hash"
+                    footerValue={latestBlock?.hash ? `${latestBlock.hash.substring(0, 8)}...` : "---"}
+                />
 
-                            {!isError && (
-                                <div className="relative z-20 flex flex-col items-center">
-                                    <span className={cn("text-[10px] sm:text-xs font-bold uppercase tracking-[0.2em] mb-1",
-                                        isActive ? "text-emerald-400" : "text-muted-foreground"
-                                    )}>
-                                        {isActive ? "Connected" : "Patience"}
-                                    </span>
-                                    <div className={cn("text-2xl sm:text-5xl lg:text-6xl font-black font-mono tracking-tighter drop-shadow-2xl transition-colors duration-1000",
-                                        isActive ? "text-emerald-500" : "text-foreground"
-                                    )}>
-                                        {formatPatience(patience)}
-                                    </div>
-                                    {vdfStatus?.is_active && (
-                                        <div className="absolute -bottom-10 left-1/2 -translate-x-1/2 w-max text-[8px] sm:text-[10px] font-black uppercase tracking-widest text-primary animate-pulse bg-primary/10 px-3 py-1 rounded-full border border-primary/20">
-                                            Calculating VDF Clock Pulse...
-                                        </div>
-                                    )}
-                                </div>
-                            )}
+                <StatCard
+                    title="Blocks Mined"
+                    value={formatNumber(minedBlocks, false)}
+                    icon={Pickaxe}
+                    footerLabel="Contribution"
+                    footerValue={minedBlocks > 0 ? "Producer" : "Validator"}
+                />
+            </div>
+
+            {/* Main Visualizer Area */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-[400px]">
+                {/* VDF Status Card */}
+                <div className="glass-card p-0 overflow-hidden flex flex-col rounded-3xl border-0 ring-1 ring-border/50">
+                    <div className="p-6 border-b border-border/50 bg-secondary/30 backdrop-blur-sm flex justify-between items-center">
+                        <h3 className="font-bold flex items-center gap-2 text-lg">
+                            <Shield className="w-5 h-5 text-primary" /> VDF Protocol
+                        </h3>
+                        {vdfStatus?.is_active && (
+                            <span className="text-[10px] font-bold px-2 py-1 bg-primary/10 text-primary rounded-md uppercase tracking-wider">Active</span>
+                        )}
+                    </div>
+                    <div className="p-8 flex-1 flex flex-col justify-center gap-8 relative bg-gradient-to-b from-transparent to-primary/5">
+                        <div className="grid grid-cols-2 gap-6">
+                            <div className="flex flex-col items-center text-center p-6 rounded-2xl bg-white/40 dark:bg-black/20 border border-white/10 shadow-sm">
+                                <Gauge className="w-8 h-8 text-primary mb-3" />
+                                <span className="text-3xl font-bold font-mono tracking-tight">{vdfStatus ? formatNumber(vdfStatus.iterations_per_second, false) : "0"}</span>
+                                <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mt-2">Iter/Sec</span>
+                            </div>
+                            <div className="flex flex-col items-center text-center p-6 rounded-2xl bg-white/40 dark:bg-black/20 border border-white/10 shadow-sm">
+                                <Zap className="w-8 h-8 text-amber-500 mb-3" />
+                                <span className="text-3xl font-bold font-mono tracking-tight">{vdfStatus ? formatNumber(vdfStatus.difficulty, false) : "---"}</span>
+                                <span className="text-xs uppercase tracking-wider text-muted-foreground font-semibold mt-2">Difficulty</span>
+                            </div>
                         </div>
 
-                        {/* Content Wrapper */}
-                        <div className="flex flex-col items-center gap-3 sm:gap-4 max-w-lg">
-                            <div className="space-y-1 sm:space-y-2">
-                                <h3 className={cn("text-lg sm:text-3xl lg:text-4xl font-black tracking-tight transition-colors duration-1000 leading-none",
-                                    isError ? "text-red-500 uppercase" :
-                                        isActive ? "text-emerald-500" : ""
-                                )}>
-                                    {isError ? "Network Unreachable" : wallet ? "Active Accumulator" : "Account Setup"}
-                                </h3>
-                                <p className="text-muted-foreground mx-auto text-[10px] sm:text-sm leading-relaxed px-4">
-                                    {isError
-                                        ? "No active relays found. Please check your connection."
-                                        : isActive
-                                            ? "Your node is successfully contributing to the network."
-                                            : wallet
-                                                ? "Your node is earning potential rewards."
-                                                : "A wallet is required to participate in consensus."}
-                                </p>
+                        <div className="space-y-3">
+                            <div className="flex justify-between text-xs font-bold text-muted-foreground uppercase tracking-widest px-1">
+                                <span>Computation Status</span>
+                                <span className={vdfStatus?.is_active ? "text-emerald-500" : "text-muted-foreground"}>
+                                    {vdfStatus?.is_active ? "RUNNING" : "IDLE"}
+                                </span>
                             </div>
-
-                            <div className="flex flex-col sm:flex-row gap-3 pt-4 w-full justify-center">
-                                {!wallet ? (
-                                    <Button asChild size="lg" className="h-10 sm:h-12 px-6 sm:px-8 rounded-xl sm:rounded-2xl shadow-xl shadow-primary/20 text-xs sm:text-sm font-bold animate-pulse">
-                                        <Link to="/wallet">Go to Wallet</Link>
-                                    </Button>
-                                ) : (
-                                    nodeStatus === "Stopped" && (
-                                        <Button onClick={handleStartNodeClick} size="lg" className="gap-2 px-8 sm:px-10 h-11 sm:h-14 rounded-xl sm:rounded-2xl shadow-2xl shadow-primary/30 text-sm sm:base font-bold hover:scale-105 active:scale-95 transition-all">
-                                            <Zap className="w-4 h-4 sm:w-5 sm:h-5 fill-current" /> Initialize Node
-                                        </Button>
-                                    )
-                                )}
-
-                                {isActive && (
-                                    <div className="flex items-center gap-2 px-6 py-2 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 text-xs font-bold animate-pulse">
-                                        <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        LIVE ON NETWORK
-                                    </div>
-                                )}
-
-                                {isError && (
-                                    <Button onClick={handleRetry} size="lg" variant="destructive" className="gap-2 px-8 sm:px-10 h-11 sm:h-14 rounded-xl sm:rounded-2xl shadow-2xl shadow-red-500/30 text-sm sm:base font-bold hover:scale-105 active:scale-95 transition-all border-none bg-red-600 hover:bg-red-700">
-                                        <RefreshCw className="w-4 h-4 sm:w-5 sm:h-5" /> Restart Node
-                                    </Button>
+                            <div className="h-2 w-full bg-secondary/50 rounded-full overflow-hidden ring-1 ring-border/20">
+                                {vdfStatus?.is_active && (
+                                    <motion.div
+                                        animate={{ x: ['-100%', '100%'] }}
+                                        transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                                        className="w-1/2 h-full bg-gradient-to-r from-transparent via-primary to-transparent"
+                                    />
                                 )}
                             </div>
                         </div>
                     </div>
-                </Card>
+                </div>
+
+                {/* Patience Accumulator */}
+                <div className="glass-card p-0 overflow-hidden flex flex-col rounded-3xl border-0 ring-1 ring-border/50 relative group">
+                    <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-700 pointer-events-none" />
+
+                    <div className="p-6 border-b border-border/50 bg-secondary/30 backdrop-blur-sm">
+                        <h3 className="font-bold flex items-center gap-2 text-lg">
+                            <Activity className="w-5 h-5 text-primary" /> Patience Accumulator
+                        </h3>
+                    </div>
+
+                    <div className="p-8 flex-1 flex flex-col items-center justify-center text-center relative z-10">
+                        <div className="relative mb-8">
+                            <div className="text-6xl md:text-7xl font-black tracking-tighter text-gradient drop-shadow-sm">
+                                {formatPatience(patience)}
+                            </div>
+                            {isActive && (
+                                <div className="absolute -right-4 -top-2">
+                                    <span className="relative flex h-4 w-4">
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                        <span className="relative inline-flex rounded-full h-4 w-4 bg-emerald-500 shadow-lg shadow-emerald-500/50"></span>
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+
+                        <p className="text-sm text-balance text-muted-foreground max-w-sm mx-auto leading-relaxed font-medium">
+                            {isActive
+                                ? "Your node is actively participating in consensus and accumulating proof of patience."
+                                : "Initialize your node to start participating in the network consensus."}
+                        </p>
+
+                        {!isActive && !isError && (
+                            <motion.div
+                                className="mt-8"
+                                whileHover={{ scale: 1.05 }}
+                                whileTap={{ scale: 0.95 }}
+                            >
+                                <Button onClick={handleStartNodeClick} className="rounded-full px-8 py-6 text-base shadow-xl shadow-primary/20">
+                                    Start Node <ArrowRight className="w-4 h-4 ml-2" />
+                                </Button>
+                            </motion.div>
+                        )}
+
+                        {isError && (
+                            <div className="mt-8 flex flex-col items-center gap-3">
+                                <p className="text-destructive font-bold text-sm bg-destructive/10 px-4 py-2 rounded-lg">Connection interrupted</p>
+                                <Button onClick={handleRetry} variant="ghost" size="sm" className="hover:bg-destructive/10 hover:text-destructive">
+                                    <RefreshCw className="w-3 h-3 mr-2" /> Retry Connection
+                                </Button>
+                            </div>
+                        )}
+                    </div>
+                </div>
             </div>
-        </PageTransition>
+        </div>
     );
 }

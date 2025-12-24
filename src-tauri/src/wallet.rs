@@ -15,6 +15,7 @@ pub struct WalletInfo {
     pub address: String,
     pub balance: u64,
     pub alias: Option<String>,
+    pub private_key: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

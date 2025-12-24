@@ -6,6 +6,8 @@ pub mod storage;
 pub mod vdf;
 pub mod wallet;
 
+use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
+
 use crate::vdf::AntigravityVDF;
 use chain::Transaction;
 use consensus::Consensus;
@@ -230,6 +232,7 @@ fn get_wallet_info(state: State<'_, AppState>) -> Option<wallet::WalletInfo> {
             address: w.address.clone(),
             balance: available_balance,
             alias: w.alias.clone(),
+            private_key: Some(hex::encode(&w.keypair)),
         })
     } else {
         None
@@ -947,6 +950,23 @@ fn exit_app() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Initialize Professional Logging
+    Logger::try_with_str("info, tauri_appantigravity_chain_lib=debug")
+        .unwrap()
+        .log_to_file(
+            FileSpec::default()
+                .directory("logs")
+                .basename("antigravity"),
+        )
+        .write_mode(WriteMode::Async)
+        .rotate(
+            Criterion::Size(10 * 1024 * 1024), // 10MB
+            Naming::Timestamps,
+            Cleanup::KeepLogFiles(7),
+        )
+        .start()
+        .expect("Failed to initialize logger");
+
     // Initialize DB
     let mut db_path = std::env::temp_dir();
     db_path.push("antigravity.db");

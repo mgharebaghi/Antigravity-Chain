@@ -1,13 +1,27 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useTheme } from '../context/ThemeContext';
 import { useApp } from '../context/AppContext';
 import { Button } from './ui/button';
-import { Moon, Sun, Monitor, Menu, Box, LogOut, LayoutDashboard, Wallet, Network, Database, History, Settings, X, Coins } from 'lucide-react';
+import {
+    Moon,
+    Sun,
+    Menu,
+    LogOut,
+    LayoutDashboard,
+    Wallet,
+    Network,
+    Settings,
+    X,
+    Coins,
+    Activity,
+    Layers,
+    Search,
+    ChevronRight
+} from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useEffect } from 'react';
 import ConfirmationModal from './ConfirmationModal';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -15,130 +29,243 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     const { exitApp } = useApp();
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [showExitModal, setShowExitModal] = useState(false);
+    const location = useLocation();
 
-    const handleExitConfirm = async () => {
-        setShowExitModal(false);
-        await exitApp();
-    };
-
+    // Handle Window Close Request
     useEffect(() => {
         let unlisten: (() => void) | undefined;
-
         async function setupCloseListener() {
             const window = getCurrentWindow();
-            // In Tauri v2, onCloseRequested takes a callback that receives an event object
-            // We can prevent the close by calling event.preventDefault()
             const u = await window.onCloseRequested((event) => {
                 event.preventDefault();
                 setShowExitModal(true);
             });
             unlisten = u;
         }
-
         setupCloseListener();
-
-        // Cleanup listener on unmount
-        return () => {
-            if (unlisten) unlisten();
-        };
+        return () => { if (unlisten) unlisten(); };
     }, []);
 
+    const handleExitConfirm = async () => {
+        setShowExitModal(false);
+        await exitApp();
+    };
+
     const navItems = [
-        { name: 'Dashboard', path: '/', icon: LayoutDashboard },
+        { name: 'Overview', path: '/', icon: LayoutDashboard },
         { name: 'Wallet', path: '/wallet', icon: Wallet },
         { name: 'Network', path: '/network', icon: Network },
         { name: 'Tokenomics', path: '/tokenomics', icon: Coins },
-        { name: 'Explorer', path: '/explorer', icon: Box },
-        { name: 'Mempool', path: '/mempool', icon: Database },
-        { name: 'Transactions', path: '/transactions', icon: History },
+        { name: 'Explorer', path: '/explorer', icon: Search },
+        { name: 'Mempool', path: '/mempool', icon: Layers },
+        { name: 'Activity', path: '/transactions', icon: Activity },
         { name: 'Settings', path: '/settings', icon: Settings },
     ];
 
+    const currentRouteName = navItems.find(item => item.path === location.pathname)?.name || "Dashboard";
+
     return (
-        <div className="flex bg-background min-h-screen font-sans text-foreground overflow-hidden">
-            {/* Sidebar (Desktop) */}
-            <aside className="hidden md:flex w-64 flex-col border-r bg-card/50 backdrop-blur-xl">
-                <div className="p-6 flex items-center gap-3 border-b border-border/50">
-                    <div className="w-9 h-9 rounded-xl bg-primary flex items-center justify-center shadow-lg shadow-primary/20">
-                        <Box className="w-5 h-5 text-primary-foreground" />
+        <div className="flex h-screen w-full bg-background text-foreground font-sans overflow-hidden selection:bg-primary/20 selection:text-primary">
+
+            {/* Desktop Sidebar - Glassmorphism */}
+            <aside className="hidden md:flex w-72 flex-col border-r border-border/50 bg-card/30 backdrop-blur-xl relative z-20">
+                <div className="h-20 flex items-center px-8 border-b border-border/50 gap-4">
+                    <div className="relative group">
+                        <div className="absolute -inset-1.5 bg-gradient-to-r from-primary to-purple-600 rounded-lg blur opacity-40 group-hover:opacity-75 transition duration-1000 group-hover:duration-200"></div>
+                        <div className="relative h-9 w-9 bg-background rounded-lg flex items-center justify-center ring-1 ring-white/10">
+                            <Activity className="h-5 w-5 text-primary" />
+                        </div>
                     </div>
-                    <div className="flex flex-col">
-                        <span className="font-bold text-lg leading-none tracking-tight">Antigravity</span>
-                        <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-widest mt-1">Mainnet Alpha</span>
+                    <div>
+                        <span className="font-bold text-xl tracking-tight block">Antigravity</span>
+                        <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold text-gradient">Chain Node</span>
                     </div>
                 </div>
-                <nav className="flex-1 p-4 space-y-1">
+
+                <div className="flex-1 py-6 px-4 space-y-1 overflow-y-auto scrollbar-thin">
+                    <div className="text-xs font-semibold text-muted-foreground mb-4 px-4 tracking-wider uppercase">Menu</div>
                     {navItems.map((item) => (
                         <NavLink
                             key={item.name}
                             to={item.path}
                             className={({ isActive }) => cn(
-                                "flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200",
+                                "flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 group relative overflow-hidden",
                                 isActive
-                                    ? "bg-primary text-primary-foreground shadow-lg shadow-primary/20"
-                                    : "hover:bg-primary/10 text-muted-foreground hover:text-primary"
+                                    ? "bg-primary/10 text-primary shadow-[0_0_20px_-12px_rgba(124,58,237,0.5)]"
+                                    : "text-muted-foreground hover:bg-muted/50 hover:text-foreground hover:translate-x-1"
                             )}
                         >
-                            <item.icon className="w-4 h-4" />
-                            {item.name}
+                            {({ isActive }) => (
+                                <>
+                                    <item.icon className={cn("h-5 w-5 transition-colors", isActive ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
+                                    <span className="relative z-10">{item.name}</span>
+                                    {isActive && (
+                                        <motion.div
+                                            layoutId="activeNavIndicator"
+                                            className="absolute left-0 w-1 h-8 bg-primary rounded-r-full"
+                                            initial={{ opacity: 0 }}
+                                            animate={{ opacity: 1 }}
+                                            exit={{ opacity: 0 }}
+                                        />
+                                    )}
+                                </>
+                            )}
                         </NavLink>
                     ))}
-                </nav>
-                <div className="p-4 border-t border-border/50">
-                    <div className="p-3 rounded-xl bg-secondary/30 flex items-center justify-between">
-                        <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">v0.1.0</span>
-                        <div className="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
+                </div>
+
+                <div className="p-6 border-t border-border/50 bg-gradient-to-b from-transparent to-background/50">
+                    <div className="glass-panel p-4 rounded-2xl border border-white/5 shadow-lg">
+                        <div className="flex items-center gap-3 mb-3">
+                            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.5)]" />
+                            <span className="text-sm font-medium">Mainnet Alpha</span>
+                        </div>
+                        <div className="h-1.5 w-full bg-muted/50 rounded-full overflow-hidden">
+                            <div className="h-full w-[98%] bg-emerald-500 rounded-full" />
+                        </div>
+                        <div className="flex justify-between mt-2 text-[10px] text-muted-foreground font-mono">
+                            <span>Block #849201</span>
+                            <span>99.9% Uptime</span>
+                        </div>
                     </div>
                 </div>
             </aside>
 
-            {/* Mobile Sidebar Overlay */}
+            {/* Main Content Area */}
+            <main className="flex-1 flex flex-col min-w-0 bg-background/50 backdrop-blur-[2px] relative">
+                {/* Header */}
+                <header className="h-20 border-b border-border/50 bg-background/60 backdrop-blur-xl flex items-center justify-between px-6 sticky top-0 z-30 transition-all duration-300">
+                    <div className="flex items-center gap-4">
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            className="md:hidden -ml-2 hover:bg-muted/50"
+                            onClick={() => setSidebarOpen(true)}
+                        >
+                            <Menu className="h-5 w-5" />
+                        </Button>
+
+                        <div className="flex items-center text-sm breadcrumbs text-muted-foreground">
+                            <span className="hidden md:inline hover:text-foreground transition-colors cursor-pointer">App</span>
+                            <ChevronRight className="h-4 w-4 mx-2 opacity-50" />
+                            <span className="font-semibold text-foreground play-font">{currentRouteName}</span>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <div className="hidden md:flex items-center px-3 py-1.5 rounded-full bg-secondary/50 border border-border/50 text-xs font-medium text-muted-foreground">
+                            <span className="w-2 h-2 rounded-full bg-primary/70 mr-2"></span>
+                            v2.1.0
+                        </div>
+
+                        <Button
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                            className="rounded-full hover:bg-secondary/80 transition-all duration-300 w-10 h-10"
+                        >
+                            <AnimatePresence mode="wait" initial={false}>
+                                <motion.div
+                                    key={theme}
+                                    initial={{ y: -20, opacity: 0 }}
+                                    animate={{ y: 0, opacity: 1 }}
+                                    exit={{ y: 20, opacity: 0 }}
+                                    transition={{ duration: 0.2 }}
+                                >
+                                    {theme === 'dark' ? <Sun className="h-5 w-5 text-amber-300" /> : <Moon className="h-5 w-5 text-slate-700" />}
+                                </motion.div>
+                            </AnimatePresence>
+                        </Button>
+
+                        <div className="h-8 w-px bg-border/50 mx-1" />
+
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-destructive hover:bg-destructive/10 hover:text-destructive gap-2 rounded-full px-4"
+                            onClick={() => setShowExitModal(true)}
+                        >
+                            <LogOut className="h-4 w-4" />
+                            <span className="hidden sm:inline font-medium">Exit</span>
+                        </Button>
+                    </div>
+                </header>
+
+                {/* Content Scroll Area */}
+                <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 scrollbar-thin">
+                    <motion.div
+                        key={location.pathname}
+                        initial={{ opacity: 0, scale: 0.98, y: 10 }}
+                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.98, y: -10 }}
+                        transition={{ duration: 0.3, ease: "easeOut" }}
+                        className="mx-auto max-w-7xl h-full"
+                    >
+                        {children}
+                    </motion.div>
+                </div>
+            </main>
+
+            {/* Mobile Sidebar Sheet */}
             <AnimatePresence>
                 {sidebarOpen && (
                     <>
                         <motion.div
-                            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-                            className="fixed inset-0 bg-background/80 backdrop-blur-sm z-40 md:hidden"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
                             onClick={() => setSidebarOpen(false)}
                         />
                         <motion.aside
-                            initial={{ x: "-100%" }} animate={{ x: 0 }} exit={{ x: "-100%" }}
-                            transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                            className="fixed inset-y-0 left-0 w-72 bg-card z-50 border-r md:hidden shadow-2xl flex flex-col"
+                            initial={{ x: "-100%" }}
+                            animate={{ x: 0 }}
+                            exit={{ x: "-100%" }}
+                            transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                            className="fixed inset-y-0 left-0 w-[85%] max-w-xs bg-background/95 backdrop-blur-2xl border-r border-border z-50 flex flex-col md:hidden shadow-2xl"
                         >
-                            <div className="p-6 flex items-center justify-between border-b">
+                            <div className="h-20 flex items-center justify-between px-6 border-b border-border/50">
                                 <div className="flex items-center gap-3">
-                                    <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-                                        <Box className="w-4 h-4 text-primary-foreground" />
+                                    <div className="h-9 w-9 bg-primary/20 rounded-xl flex items-center justify-center border border-primary/20">
+                                        <Activity className="h-5 w-5 text-primary" />
                                     </div>
-                                    <span className="font-bold text-lg">Antigravity</span>
+                                    <span className="font-bold text-xl">Antigravity</span>
                                 </div>
-                                <Button variant="ghost" size="icon" className="rounded-full" onClick={() => setSidebarOpen(false)}>
-                                    <X className="w-5 h-5" />
+                                <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(false)}>
+                                    <X className="h-5 w-5" />
                                 </Button>
                             </div>
-                            <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
+
+                            <nav className="flex-1 p-4 space-y-1 overflow-y-auto scrollbar-thin">
                                 {navItems.map((item) => (
                                     <NavLink
-                                        key={item.name}
+                                        key={item.path}
                                         to={item.path}
                                         onClick={() => setSidebarOpen(false)}
                                         className={({ isActive }) => cn(
-                                            "flex items-center gap-4 px-4 py-4 text-base font-medium rounded-2xl transition-all",
+                                            "flex items-center gap-3 px-4 py-3.5 rounded-xl text-sm font-medium transition-all duration-200",
                                             isActive
-                                                ? "bg-primary text-primary-foreground shadow-xl shadow-primary/25"
-                                                : "hover:bg-secondary text-muted-foreground"
+                                                ? "bg-primary/10 text-primary border border-primary/10 shadow-sm"
+                                                : "text-muted-foreground hover:bg-muted hover:text-foreground"
                                         )}
                                     >
-                                        <item.icon className="w-5 h-5" />
+                                        <item.icon className="h-5 w-5" />
                                         {item.name}
                                     </NavLink>
                                 ))}
                             </nav>
-                            <div className="p-6 border-t">
-                                <Button variant="outline" className="w-full justify-start gap-3 rounded-xl py-6" onClick={() => setShowExitModal(true)}>
-                                    <LogOut className="w-5 h-5 text-red-500" />
-                                    <span className="text-red-500">Exit Application</span>
+
+                            <div className="p-4 border-t border-border/50 bg-muted/20">
+                                <Button
+                                    variant="destructive"
+                                    className="w-full justify-start gap-3 rounded-xl h-11"
+                                    onClick={() => {
+                                        setSidebarOpen(false);
+                                        setShowExitModal(true);
+                                    }}
+                                >
+                                    <LogOut className="h-4 w-4" />
+                                    Exit Application
                                 </Button>
                             </div>
                         </motion.aside>
@@ -146,84 +273,12 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 )}
             </AnimatePresence>
 
-            {/* Main Content */}
-            <main className="flex-1 flex flex-col relative h-screen overflow-hidden">
-                {/* Header */}
-                <header className="h-16 border-b bg-background/50 backdrop-blur-md flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30 flex-shrink-0">
-                    <div className="flex items-center gap-4">
-                        <Button variant="ghost" size="icon" className="md:hidden rounded-xl border border-border/50" onClick={() => setSidebarOpen(true)}>
-                            <Menu className="w-5 h-5" />
-                        </Button>
-                        <div className="md:hidden flex items-center gap-2">
-                            <div className="w-6 h-6 rounded bg-primary flex items-center justify-center">
-                                <Box className="w-3.5 h-3.5 text-primary-foreground" />
-                            </div>
-                            <span className="font-bold text-sm tracking-tight">Antigravity</span>
-                        </div>
-                    </div>
-
-                    {/* Desktop Theme Switcher & Actions */}
-                    <div className="flex items-center gap-2">
-                        <div className="hidden md:flex items-center gap-1 bg-secondary/30 p-1 rounded-xl">
-                            <Button
-                                variant="ghost" size="icon"
-                                onClick={() => setTheme("light")}
-                                className={cn("h-8 w-8 rounded-lg", theme === 'light' && "bg-background shadow-sm text-primary")}
-                            >
-                                <Sun className="h-4 w-4" />
-                            </Button>
-                            <Button
-                                variant="ghost" size="icon"
-                                onClick={() => setTheme("dark")}
-                                className={cn("h-8 w-8 rounded-lg", theme === 'dark' && "bg-background shadow-sm text-primary")}
-                            >
-                                <Moon className="h-4 w-4" />
-                            </Button>
-                            <Button
-                                variant="ghost" size="icon"
-                                onClick={() => setTheme("system")}
-                                className={cn("h-8 w-8 rounded-lg", theme === 'system' && "bg-background shadow-sm text-primary")}
-                            >
-                                <Monitor className="h-4 w-4" />
-                            </Button>
-                        </div>
-
-                        <div className="w-px h-6 bg-border mx-2 hidden sm:block" />
-
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-red-500 hover:text-red-600 hover:bg-red-500/10 gap-2 h-9 px-4 rounded-xl hidden md:flex"
-                            onClick={() => setShowExitModal(true)}
-                        >
-                            <LogOut className="w-4 h-4" />
-                            <span className="font-medium">Exit</span>
-                        </Button>
-
-                        {/* Mobile Theme Toggle (Simple) */}
-                        <Button
-                            variant="ghost" size="icon"
-                            className="md:hidden rounded-xl"
-                            onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                        >
-                            {theme === 'dark' ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-                        </Button>
-                    </div>
-                </header>
-
-                <div className="flex-1 overflow-y-auto p-4 sm:p-6 min-h-0">
-                    <div className="max-w-7xl mx-auto">
-                        {children}
-                    </div>
-                </div>
-            </main>
-
             <ConfirmationModal
                 isOpen={showExitModal}
                 onClose={() => setShowExitModal(false)}
                 onConfirm={handleExitConfirm}
-                title="Exit Application?"
-                description="Are you sure you want to close the node and exit? This will stop your contribution to the network and you will stop earning Patience."
+                title="Exit Application"
+                description="Are you sure you want to quit? Your node will stop validating transactions."
                 confirmText="Yes, Exit"
                 variant="danger"
             />

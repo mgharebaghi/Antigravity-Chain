@@ -186,6 +186,7 @@ pub async fn start_p2p_node(
         }
     }
 
+    let _ = app_handle.emit("relay-status", "Connecting...");
     let _ = app_handle.emit("node-status", "Connecting");
 
     // Event Loop
@@ -372,16 +373,26 @@ pub async fn start_p2p_node(
                     }
                 },
                 SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                    let relay_addr_str = "/ip4/127.0.0.1/tcp/9090"; // Re-evaluate or pass in
-                    if endpoint.is_dialer() && endpoint.get_remote_address().to_string().contains("9090") {
+                    let remote_addr = endpoint.get_remote_address().to_string();
+                    if endpoint.is_dialer() && remote_addr.contains(&relay_addr) {
+                        log::info!("Relay connection established with {}", peer_id);
                         let _ = app_handle.emit("relay-status", "connected");
+                        let _ = app_handle.emit("relay-info", peer_id.to_string());
+                        // Explicitly remove relay from consensus nodes if it was added via Identify/Mdns
+                        consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
                     } else {
+                        // Only register non-relay nodes in consensus
                         consensus.lock().unwrap().register_node(peer_id.to_string());
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
-                SwarmEvent::ConnectionClosed { .. } => {
-                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
+                SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
+                    let remote_addr = endpoint.get_remote_address().to_string();
+                    if remote_addr.contains(&relay_addr) {
+                        log::warn!("Relay connection closed: {}", peer_id);
+                        let _ = app_handle.emit("relay-status", "disconnected");
+                    }
+                    peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Kad(kad::Event::RoutingUpdated { .. })) => {
                      peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);

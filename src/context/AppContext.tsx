@@ -7,6 +7,7 @@ export interface WalletInfo {
     address: string;
     alias?: string;
     balance?: number;
+    private_key?: string;
 }
 
 export interface Transaction {
@@ -28,6 +29,13 @@ export interface Block {
     start_time_weight: number;
     vdf_proof?: string;
     signature?: string;
+    // Extended fields for UI
+    version?: number;
+    size?: number;
+    total_reward?: number;
+    merkle_root?: string;
+    state_root?: string;
+    nonce?: number;
 }
 
 export interface VdfStatus {

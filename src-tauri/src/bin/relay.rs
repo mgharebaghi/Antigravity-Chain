@@ -16,7 +16,7 @@ struct RelayBehaviour {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    env_logger::init();
+    flexi_logger::Logger::try_with_str("info")?.start()?;
 
     // Create a static keypair for the relay so its PeerId doesn't change on restart
     // In a real usage, load this from a file

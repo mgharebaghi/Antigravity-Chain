@@ -1,20 +1,5 @@
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Badge } from "../components/ui/badge.tsx";
-import PageTransition from "../components/PageTransition";
-import {
-    ShieldCheck,
-    ShieldAlert,
-    Activity,
-    Globe,
-    Zap,
-    Server,
-    Network as NetworkIcon,
-    Link,
-    Wifi,
-    Terminal,
-    Copy,
-    Check,
-} from "lucide-react";
+import { Badge } from "../components/ui/badge";
+import { ShieldCheck, ShieldAlert, Activity, Globe, Server, Network as NetworkIcon, Link, Wifi, Copy, Check, Cpu } from "lucide-react";
 import { useEffect, useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
@@ -34,12 +19,10 @@ interface SelfNodeInfo {
     addresses: string[];
 }
 
-
-// Simple deterministic color generator for peer IDs
 const getPeerColor = (peerId: string) => {
     const hash = peerId.split('').reduce((acc, char) => char.charCodeAt(0) + ((acc << 5) - acc), 0);
     const h = Math.abs(hash % 360);
-    return `hsl(${h}, 70%, 60%)`;
+    return `hsl(${h}, 70%, 50%)`;
 };
 
 export default function Network() {
@@ -48,8 +31,6 @@ export default function Network() {
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const { height, relayStatus, connectedRelay } = useApp();
     const { success } = useToast();
-
-    // Mock TPS calculation based on node count and theoretical capacity
 
     useEffect(() => {
         const fetchData = async () => {
@@ -88,236 +69,213 @@ export default function Network() {
     };
 
     return (
-        <PageTransition>
-            <div className="flex flex-col gap-3 sm:gap-6 min-h-full container mx-auto p-4 sm:p-6 lg:max-w-7xl pb-10">
-                {/* Header Section */}
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 sm:gap-4 shrink-0 px-1 sm:px-2">
-                    <div className="flex items-center gap-2 sm:gap-4">
-                        <div className="p-1.5 sm:p-3 bg-primary/10 rounded-xl sm:rounded-2xl border border-primary/20 shadow-inner shrink-0">
-                            <NetworkIcon className="w-4 h-4 sm:w-6 sm:h-6 text-primary" />
+        <div className="flex flex-col gap-6 h-full">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div>
+                    <h1 className="text-3xl font-bold tracking-tight">Network Status</h1>
+                    <p className="text-muted-foreground mt-1 text-sm">Real-time P2P connectivity and node metrics.</p>
+                </div>
+                <div className="flex items-center gap-3 bg-secondary/30 px-4 py-2 rounded-full border border-border/50">
+                    <div className={cn(
+                        "w-2 h-2 rounded-full",
+                        relayStatus.toLowerCase() === 'connected' ? "bg-emerald-500 animate-pulse" :
+                            relayStatus.toLowerCase().includes('disconnected') ? "bg-red-500" : "bg-orange-500"
+                    )} />
+                    <span className={cn(
+                        "text-sm font-medium",
+                        relayStatus.toLowerCase().includes('disconnected') && "text-red-500"
+                    )}>
+                        {relayStatus || "Measuring..."}
+                    </span>
+                </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+                {/* Local Identity Card */}
+                <div className="glass-card rounded-3xl p-6 flex flex-col justify-between border-primary/20 bg-primary/5 relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-primary/20 rounded-full blur-3xl -mr-16 -mt-16 pointer-events-none group-hover:bg-primary/30 transition-colors" />
+                    <div>
+                        <div className="flex items-center gap-3 mb-6">
+                            <div className="p-2.5 bg-background/50 rounded-xl backdrop-blur-sm border border-white/10 shadow-sm">
+                                <Server className="w-5 h-5 text-primary" />
+                            </div>
+                            <h3 className="font-bold text-lg">Local Identity</h3>
                         </div>
-                        <div>
-                            <h1 className="text-lg sm:text-2xl font-extrabold tracking-tight text-foreground leading-none">Mesh Infrastructure</h1>
-                            <p className="text-[9px] sm:text-xs text-muted-foreground flex items-center gap-1.5 font-semibold mt-1">
-                                <Globe className="w-2.5 h-2.5 sm:w-3 h-3" /> Real-time peer-to-peer technical diagnostics
-                            </p>
-                        </div>
+
+                        {selfInfo ? (
+                            <div className="space-y-6">
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground pl-1">Peer ID</label>
+                                    <div className="flex items-center gap-2 p-3 bg-background/40 hover:bg-background/60 backdrop-blur-sm rounded-xl border border-white/10 group/copy transition-colors cursor-pointer" onClick={() => copyToClipboard(selfInfo.peer_id, 'peer_id')}>
+                                        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-purple-500 shrink-0" />
+                                        <code className="text-xs font-mono font-medium truncate flex-1 opacity-80 group-hover/copy:opacity-100 transition-opacity">{selfInfo.peer_id}</code>
+                                        <div className="p-1.5 rounded-md hover:bg-white/10">
+                                            {copiedId === 'peer_id' ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5 text-muted-foreground" />}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground pl-1">Entrypoints</label>
+                                    <div className="bg-background/40 rounded-xl p-3 max-h-[120px] overflow-y-auto space-y-2 custom-scrollbar border border-white/10">
+                                        {selfInfo.addresses.length > 0 ? selfInfo.addresses.map((addr, i) => (
+                                            <div key={i} className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground bg-white/5 p-1.5 rounded-lg">
+                                                <Wifi className="w-3 h-3 opacity-50 shrink-0" />
+                                                <span className="truncate">{addr}</span>
+                                            </div>
+                                        )) : (
+                                            <div className="p-2 text-center text-xs text-muted-foreground italic">Resolving addresses...</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="py-12 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+                                <Cpu className="w-10 h-10 opacity-20 animate-pulse" />
+                                <span className="text-xs font-medium uppercase tracking-wider opacity-60">Initializing P2P Kernel...</span>
+                            </div>
+                        )}
                     </div>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 shrink-0 px-1">
-                    {/* Self Node Technical Details */}
-                    <Card className="flex-1 border-primary/20 bg-card/10 backdrop-blur-xl shadow-xl rounded-[1.2rem] sm:rounded-[2rem] overflow-hidden min-h-0 flex flex-col">
-                        <CardHeader className="bg-primary/5 py-1.5 sm:py-3 px-3 sm:px-5 border-b border-primary/10 flex flex-row items-center gap-2 sm:gap-3 shrink-0">
-                            <Server className="w-3.5 h-3.5 sm:w-4 h-4 text-primary" />
-                            <CardTitle className="text-[8px] sm:text-[10px] font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] text-primary/90">Identity</CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-3 sm:p-4 space-y-2 sm:space-y-3 min-h-0 flex-1 flex flex-col overflow-hidden">
-                            {selfInfo ? (
-                                <>
-                                    <div className="space-y-1.5">
-                                        <div className="flex justify-between items-center px-1">
-                                            <label className="text-[9px] font-black uppercase text-muted-foreground tracking-tighter">Your Peer ID</label>
-                                            <button
-                                                onClick={() => copyToClipboard(selfInfo.peer_id, 'peer_id')}
-                                                className="hover:text-primary transition-colors"
-                                            >
-                                                {copiedId === 'peer_id' ? <Check className="w-2.5 h-2.5 text-green-500" /> : <Copy className="w-2.5 h-2.5" />}
-                                            </button>
-                                        </div>
-                                        <div className="p-2 sm:p-3 bg-muted/30 rounded-lg sm:rounded-xl border border-primary/5 font-mono text-[9px] sm:text-[11px] font-bold text-foreground/80 break-all leading-tight sm:leading-relaxed">
-                                            {selfInfo.peer_id}
-                                        </div>
-                                    </div>
-                                    <div className="space-y-1 flex-1 min-h-0 flex flex-col overflow-hidden text-xs">
-                                        <label className="text-[8px] font-bold uppercase text-muted-foreground/80 tracking-widest px-1 shrink-0">Multiaddresses ({selfInfo.addresses.length})</label>
-                                        <div className="flex-1 overflow-y-auto pr-1 custom-scrollbar space-y-1 sm:space-y-1.5">
-                                            {selfInfo.addresses.length > 0 ? selfInfo.addresses.map((addr, i) => (
-                                                <div key={i} className="flex items-center gap-2 p-1 sm:p-2 bg-muted/20 rounded-md sm:rounded-lg border border-primary/5 group transition-colors hover:bg-muted/30">
-                                                    <div className="w-4 h-4 rounded-md bg-green-500/10 flex items-center justify-center text-green-500 shrink-0">
-                                                        <Wifi className="w-2.5 h-2.5" />
-                                                    </div>
-                                                    <span className="font-mono text-[7px] sm:text-[9px] text-muted-foreground truncate flex-1 leading-none">{addr}</span>
-                                                </div>
-                                            )) : (
-                                                <div className="p-2 sm:p-3 bg-muted/10 rounded-xl border border-dashed border-primary/10 text-[8px] sm:text-[9px] text-muted-foreground text-center italic">
-                                                    Fetching transport addresses...
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </>
-                            ) : (
-                                <div className="h-full flex items-center justify-center animate-pulse text-muted-foreground text-[10px] font-bold">
-                                    Initializing P2P Stack...
-                                </div>
-                            )}
-                        </CardContent>
-                    </Card>
+                {/* Gateway / Metrics Card */}
+                <div className="lg:col-span-2 glass-card rounded-3xl p-6 flex flex-col justify-between relative overflow-hidden">
+                    <div className="absolute inset-0 bg-gradient-to-br from-secondary/30 to-transparent pointer-events-none" />
 
-                    {/* Relay Connection Status */}
-                    <Card className="flex-1 border-primary/20 bg-card/10 backdrop-blur-xl shadow-xl rounded-[1.2rem] sm:rounded-[2rem] overflow-hidden min-w-0 sm:min-w-[280px] min-h-0 flex flex-col">
-                        <CardHeader className="bg-primary/5 py-1.5 sm:py-3 px-3 sm:px-5 border-b border-primary/10 flex flex-row items-center gap-2 sm:gap-3 shrink-0">
-                            <Zap className="w-3.5 h-3.5 sm:w-4 h-4 text-primary" />
-                            <CardTitle className="text-[8px] sm:text-[10px] font-bold uppercase tracking-[0.1em] sm:tracking-[0.15em] text-primary/90">Bridge Status</CardTitle>
-                        </CardHeader>
-                        <CardContent className="p-3 sm:p-4 space-y-2 sm:space-y-3 min-h-0 flex-1 flex flex-col overflow-hidden">
-                            <div className="space-y-2 sm:space-y-4">
-                                <div className="flex items-center gap-3 py-1.5 sm:py-2 px-1.5 sm:px-2 bg-muted/10 rounded-xl sm:rounded-2xl border border-primary/5">
-                                    <div className={cn(
-                                        "w-8 h-8 sm:w-12 sm:h-12 rounded-full flex items-center justify-center relative shadow-lg shrink-0",
-                                        relayStatus.toLowerCase().includes('connected') ? "bg-green-500/10 text-green-500 shadow-green-500/10" : "bg-orange-500/10 text-orange-500 shadow-orange-500/10"
-                                    )}>
-                                        <div className={cn(
-                                            "absolute inset-0 rounded-full animate-ping opacity-10",
-                                            relayStatus.toLowerCase().includes('connected') ? "bg-green-500" : "bg-orange-500"
-                                        )} />
-                                        <Link className="w-4 h-4 sm:w-6 sm:h-6 relative z-10" />
-                                    </div>
-                                    <div className="min-w-0">
-                                        <div className="text-[8px] font-black uppercase text-muted-foreground tracking-widest mb-0.5 leading-none">State</div>
-                                        <div className={cn(
-                                            "text-xs sm:text-sm font-black uppercase leading-tight truncate",
-                                            relayStatus.toLowerCase().includes('connected') ? "text-emerald-500" : "text-orange-500"
-                                        )}>
-                                            {relayStatus}
-                                        </div>
-                                    </div>
+                    <div className="relative z-10 flex flex-col h-full gap-8">
+                        <div className="flex items-start justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="p-2.5 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-500">
+                                    <Globe className="w-5 h-5" />
                                 </div>
-
-                                <div className="space-y-1.5 pt-2 border-t border-primary/5 text-[9px] sm:text-[10px]">
-                                    <div className="flex justify-between items-center px-1">
-                                        <span className="font-bold uppercase text-muted-foreground/60 tracking-wider">Height</span>
-                                        <span className="font-extrabold text-foreground">#{height}</span>
-                                    </div>
-                                    <div className="flex justify-between items-center px-1">
-                                        <span className="font-bold uppercase text-muted-foreground/60 tracking-wider">Latency</span>
-                                        <span className="font-extrabold text-foreground">{avgLatency}ms</span>
-                                    </div>
-                                    <div className="flex justify-between items-center px-1">
-                                        <span className="font-bold uppercase text-muted-foreground/60 tracking-wider">Relay</span>
-                                        <span className="font-mono font-bold text-primary truncate max-w-[80px] sm:max-w-[120px]">
-                                            {connectedRelay ? `${connectedRelay.substring(0, 8)}...` : "none"}
-                                        </span>
-                                    </div>
+                                <div>
+                                    <h3 className="font-bold text-lg">Network Gateway</h3>
+                                    <p className="text-xs text-muted-foreground">Global mesh connectivity status</p>
                                 </div>
                             </div>
-                        </CardContent>
-                    </Card>
+                            <div className="text-right">
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Ledger Height</p>
+                                <p className="text-2xl font-mono font-black text-foreground">#{height.toLocaleString()}</p>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-auto">
+                            <div className="p-5 rounded-2xl bg-secondary/30 border border-border/50 flex flex-col gap-2 relative overflow-hidden group hover:border-primary/20 transition-colors">
+                                <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
+                                    <Link className="w-12 h-12" />
+                                </div>
+                                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground z-10">Relay Connection</span>
+                                <div className="flex items-center gap-2 z-10">
+                                    <span className={cn(
+                                        "text-xl font-bold",
+                                        relayStatus.toLowerCase() === 'connected' ? "text-emerald-500" :
+                                            relayStatus.toLowerCase().includes('disconnected') ? "text-red-500" : "text-orange-500"
+                                    )}>
+                                        {relayStatus.toLowerCase() === 'connected' ? "Active" :
+                                            relayStatus.toLowerCase().includes('disconnected') ? "Offline" : "Connecting"}
+                                    </span>
+                                    {relayStatus.toLowerCase() === 'connected' ? (
+                                        <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                                    ) : relayStatus.toLowerCase().includes('disconnected') ? (
+                                        <ShieldAlert className="w-4 h-4 text-red-500" />
+                                    ) : null}
+                                </div>
+                            </div>
+
+                            <div className="p-5 rounded-2xl bg-secondary/30 border border-border/50 flex flex-col gap-2 relative overflow-hidden group hover:border-primary/20 transition-colors">
+                                <div className="absolute right-0 top-0 p-4 opacity-10 group-hover:scale-110 transition-transform">
+                                    <Activity className="w-12 h-12" />
+                                </div>
+                                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground z-10">Network Latency</span>
+                                <div className="flex items-center gap-2 z-10">
+                                    <span className={cn("text-xl font-bold", avgLatency < 100 ? "text-emerald-500" : "text-amber-500")}>
+                                        {avgLatency} <span className="text-sm">ms</span>
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            {/* Peers List */}
+            <div className="flex-1 glass-card rounded-3xl border-none flex flex-col min-h-[400px] overflow-hidden shadow-none bg-background/30">
+                <div className="p-6 border-b border-border/50 flex items-center justify-between bg-secondary/20">
+                    <h3 className="font-bold text-lg flex items-center gap-2">
+                        <NetworkIcon className="w-5 h-5 text-primary" /> Active Peers
+                        <Badge variant="secondary" className="ml-2 font-mono text-xs">{validatorPeers.length}</Badge>
+                    </h3>
                 </div>
 
-                {/* Detailed Mesh Grid */}
-                <Card className="flex-1 min-h-0 flex flex-col border-primary/20 bg-card/5 backdrop-blur-2xl shadow-2xl rounded-2xl sm:rounded-[2.5rem]">
-                    <CardHeader className="py-2.5 px-3 sm:py-6 sm:px-8 border-b border-primary/10 shrink-0 flex flex-row items-center justify-between gap-3 bg-muted/10">
-                        <div className="flex items-center gap-2 sm:gap-4 min-w-0 flex-1">
-                            <div className="p-1.5 sm:p-2.5 bg-primary/10 rounded-lg sm:rounded-xl border border-primary/20 shrink-0 flex">
-                                <Terminal className="w-3.5 h-3.5 sm:w-5 sm:h-5 text-primary" />
+                <div className="flex-1 overflow-x-auto overflow-y-auto">
+                    {validatorPeers.length === 0 ? (
+                        <div className="h-full flex flex-col items-center justify-center p-12 text-muted-foreground gap-4">
+                            <div className="w-16 h-16 bg-secondary/50 rounded-full flex items-center justify-center opacity-50 relative">
+                                <div className="absolute inset-0 rounded-full border border-primary/20 animate-ping" />
+                                <Activity className="w-8 h-8 animate-pulse text-primary" />
                             </div>
-                            <div className="min-w-0">
-                                <CardTitle className="text-[8px] sm:text-[10px] font-bold uppercase text-primary/70 tracking-[0.15em] sm:tracking-[0.25em] mb-0.5 leading-none">
-                                    Peer Matrix
-                                </CardTitle>
-                                <h3 className="text-xs sm:text-xl font-extrabold text-foreground tracking-tight leading-none truncate mt-0.5 sm:mt-1">
-                                    DHT Bucket Nodes
-                                </h3>
+                            <div className="text-center">
+                                <h4 className="font-bold text-foreground">Discovery Mode Active</h4>
+                                <p className="text-sm mt-1 max-w-xs mx-auto opacity-70">Scanning distributed hash table for verified peers...</p>
                             </div>
                         </div>
-                        <Badge className="bg-primary/20 text-primary border-primary/20 font-black px-2 sm:px-4 py-1 sm:py-1.5 rounded-full text-[7px] sm:text-[10px] tracking-widest uppercase shrink-0">
-                            {validatorPeers.length} <span className="hidden xs:inline">Validator {validatorPeers.length === 1 ? 'Node' : 'Nodes'}</span>
-                            <span className="xs:hidden">VALS</span>
-                        </Badge>
-                    </CardHeader>
-                    <CardContent className="flex-1 overflow-y-auto p-3 sm:p-8 custom-scrollbar min-h-0">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-3 sm:gap-6">
-                            {validatorPeers.length === 0 ? (
-                                <div className="col-span-full h-64 sm:h-80 flex flex-col items-center justify-center text-muted-foreground gap-6 sm:gap-8 opacity-40">
-                                    <div className="relative w-16 h-16 sm:w-24 sm:h-24">
-                                        <Activity className="w-full h-full animate-pulse" />
-                                    </div>
-                                    <div className="text-center space-y-1 sm:space-y-2 px-4">
-                                        <h3 className="font-black text-foreground text-base sm:text-xl">Searching for validators...</h3>
-                                        <p className="text-[10px] sm:text-xs max-w-sm mx-auto leading-relaxed italic">
-                                            Local DHT is performing lookup for verified validator nodes. Connected nodes will appear here with technical metrics.
-                                        </p>
-                                    </div>
-                                </div>
-                            ) : (
-                                validatorPeers.map((peer) => (
-                                    <div key={peer.peer_id} className="group p-3 sm:p-6 rounded-xl sm:rounded-[2rem] border border-primary/5 bg-background/40 flex flex-col gap-3 sm:gap-6 hover:border-primary/40 hover:bg-card/40 transition-all shadow-sm hover:shadow-2xl">
-                                        <div className="flex items-start justify-between gap-2">
-                                            <div className="flex items-center gap-2 sm:gap-4 min-w-0">
-                                                <div
-                                                    className="w-8 h-8 sm:w-12 sm:h-12 rounded-lg sm:rounded-2xl flex items-center justify-center text-white font-black text-[10px] sm:text-lg shadow-lg shrink-0 group-hover:scale-110 transition-transform"
-                                                    style={{ backgroundColor: getPeerColor(peer.peer_id) }}
-                                                >
-                                                    {peer.peer_id.substring(peer.peer_id.length - 2).toUpperCase()}
-                                                </div>
-                                                <div className="min-w-0">
-                                                    <div className="text-[7px] sm:text-[9px] font-black uppercase text-muted-foreground tracking-tighter mb-0.5 leading-none">Identity</div>
-                                                    <div className="text-[9px] sm:text-xs font-mono font-bold text-foreground/90 truncate max-w-[80px] sm:max-w-[140px]" title={peer.peer_id}>
-                                                        {peer.peer_id.substring(0, 10)}...
-                                                    </div>
-                                                </div>
+                    ) : (
+                        <table className="w-full text-sm text-left border-collapse min-w-[600px]">
+                            <thead className="text-[10px] uppercase font-bold text-muted-foreground bg-secondary/30 tracking-wider">
+                                <tr>
+                                    <th className="px-6 py-4 w-20">Badge</th>
+                                    <th className="px-6 py-4">Node Identity</th>
+                                    <th className="px-6 py-4">Verification</th>
+                                    <th className="px-6 py-4 text-right">Trust Score</th>
+                                    <th className="px-6 py-4 text-right">Round Trip</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border/30">
+                                {validatorPeers.map((peer) => (
+                                    <tr key={peer.peer_id} className="hover:bg-primary/5 transition-colors group">
+                                        <td className="px-6 py-4">
+                                            <div
+                                                className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shadow-lg ring-2 ring-white/10"
+                                                style={{ backgroundColor: getPeerColor(peer.peer_id) }}
+                                            >
+                                                {peer.peer_id.substring(peer.peer_id.length - 2).toUpperCase()}
                                             </div>
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            <div className="flex flex-col gap-0.5">
+                                                <span className="font-mono font-bold text-sm text-foreground/80 group-hover:text-primary transition-colors truncate max-w-[180px] xl:max-w-xs">{peer.peer_id}</span>
+                                                <span className="text-[10px] text-muted-foreground">{peer.addresses.length} active routes</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4">
                                             {peer.is_verified ? (
-                                                <div className="p-1 sm:p-2.5 rounded-lg sm:rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/10 shadow-sm shrink-0" title="VDF Proof Verified - Sybil Protected">
-                                                    <ShieldCheck className="w-3.5 h-3.5 sm:w-5 h-5" />
+                                                <div className="flex items-center gap-1.5 text-emerald-500 font-bold text-xs bg-emerald-500/10 w-fit px-2 py-1 rounded-md">
+                                                    <ShieldCheck className="w-3.5 h-3.5" /> Verified
                                                 </div>
                                             ) : (
-                                                <div className="p-1 sm:p-2.5 rounded-lg sm:rounded-2xl bg-orange-500/10 text-orange-500 border border-orange-500/10 shadow-sm shrink-0" title="VDF Pendng - Quarantine Period">
-                                                    <ShieldAlert className="w-3.5 h-3.5 sm:w-5 h-5" />
+                                                <div className="flex items-center gap-1.5 text-amber-500 font-bold text-xs bg-amber-500/10 w-fit px-2 py-1 rounded-md">
+                                                    <ShieldAlert className="w-3.5 h-3.5" /> Unknown
                                                 </div>
                                             )}
-                                        </div>
-
-                                        <div className="space-y-3 sm:space-y-4">
-                                            <div className="space-y-1.5 sm:space-y-2">
-                                                <div className="flex justify-between items-center px-0.5">
-                                                    <span className="text-[8px] sm:text-[10px] font-black uppercase text-muted-foreground/60 tracking-tighter">Connection Routes</span>
-                                                    <span className="text-[8px] sm:text-[9px] font-black bg-primary/10 text-primary px-1.5 py-0.5 rounded-md">{peer.addresses.length} ADDR</span>
+                                        </td>
+                                        <td className="px-6 py-4 text-right">
+                                            <div className="flex items-center justify-end gap-2">
+                                                <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
+                                                    <div className={cn("h-full rounded-full", peer.trust_score > 0.8 ? "bg-emerald-500" : "bg-amber-500")} style={{ width: `${peer.trust_score * 100}%` }} />
                                                 </div>
-                                                <div className="space-y-1 grayscale group-hover:grayscale-0 transition-all duration-500 max-h-[60px] sm:max-h-[80px] overflow-y-auto scrollbar-none">
-                                                    {peer.addresses.map((addr, idx) => (
-                                                        <div key={idx} className="font-mono text-[8px] sm:text-[9px] text-muted-foreground/70 bg-muted/20 p-1.5 sm:p-2 rounded-md sm:rounded-lg truncate border border-primary/5">
-                                                            {addr}
-                                                        </div>
-                                                    ))}
-                                                    {peer.addresses.length === 0 && (
-                                                        <div className="text-[8px] text-muted-foreground italic px-1 pt-1 flex items-center gap-1.5">
-                                                            <div className="w-1 h-1 rounded-full bg-orange-500 animate-pulse" />
-                                                            Discovery via relay in progress...
-                                                        </div>
-                                                    )}
-                                                </div>
+                                                <span className="font-mono font-bold text-xs">{(peer.trust_score * 100).toFixed(0)}%</span>
                                             </div>
-
-                                            <div className="pt-3 sm:pt-4 border-t border-primary/5 flex items-center justify-between">
-                                                <div className="flex items-center gap-3">
-                                                    <div className="flex flex-col">
-                                                        <span className="text-[8px] sm:text-[9px] font-black uppercase text-muted-foreground/60">Trust</span>
-                                                        <span className={cn(
-                                                            "text-[10px] sm:text-xs font-black",
-                                                            peer.trust_score > 0.8 ? "text-emerald-500" : "text-orange-500"
-                                                        )}>
-                                                            {peer.is_verified ? "Sybil Secure" : `${(peer.trust_score * 100).toFixed(0)}% Trust`}
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                                <div className="text-right">
-                                                    <span className="text-[8px] sm:text-[9px] font-black uppercase text-muted-foreground/60">Latency</span>
-                                                    <div className="text-[10px] sm:text-xs font-black text-foreground">
-                                                        {peer.latency || 0} <span className="text-[8px] sm:text-[9px] opacity-40 font-black">MS</span>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                ))
-                            )}
-                        </div>
-                    </CardContent>
-                </Card>
+                                        </td>
+                                        <td className="px-6 py-4 text-right">
+                                            <span className="font-mono font-medium text-xs text-muted-foreground">{peer.latency} ms</span>
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
             </div>
-        </PageTransition>
+        </div>
     );
 }

@@ -12,6 +12,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { AppProvider } from "./context/AppContext";
 import { ToastProvider } from "./context/ToastContext";
 import Layout from "./components/Layout";
+import { WelcomeAnimation } from "./components/WelcomeAnimation";
 import "./App.css";
 
 function AnimatedRoutes() {
@@ -40,6 +41,7 @@ function App() {
         <AppProvider>
           <HashRouter>
             <Layout>
+              <WelcomeAnimation />
               <AnimatedRoutes />
             </Layout>
           </HashRouter>
