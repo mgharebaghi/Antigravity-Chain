@@ -192,14 +192,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 </header>
 
                 {/* Content Scroll Area */}
-                <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 lg:p-8 scrollbar-thin">
+                <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-thin">
                     <motion.div
                         key={location.pathname}
                         initial={{ opacity: 0, scale: 0.98, y: 10 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.98, y: -10 }}
                         transition={{ duration: 0.3, ease: "easeOut" }}
-                        className="mx-auto max-w-7xl h-full"
+                        className="mx-auto w-full h-full p-4 sm:p-6 lg:p-8"
                     >
                         {children}
                     </motion.div>

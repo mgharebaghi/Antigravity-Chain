@@ -7,9 +7,12 @@ pub const ONE_AGT: u64 = 1_000_000;
 // Tokenomics Constants
 pub const TOTAL_SUPPLY: u64 = 21_000_000 * ONE_AGT;
 pub const GENESIS_SUPPLY: u64 = 5_000_000 * ONE_AGT;
-pub const INITIAL_REWARD: u64 = 40 * ONE_AGT;
-pub const HALVING_INTERVAL_EARLY: u64 = 100_000; // Fast scarcity for early adopters (first 5 halvings)
-pub const HALVING_INTERVAL_STABLE: u64 = 400_000; // Long-term stability
+pub const INITIAL_REWARD: u64 = 126_839; // ~0.12 AGT (Targeting 21M supply over ~100 years at 2s block time)
+pub const HALVING_INTERVAL: u64 = 63_072_000; // 4 Years in 2s blocks
+
+pub const MAX_BLOCK_SIZE: u64 = 1_500_000; // 1.5 MB Cap per shard
+pub const TARGET_BLOCK_TIME: u64 = 2; // 2 Seconds
+pub const MAX_TXS_PER_BLOCK: u64 = 3_000; // 3000 txs / 2s = 1500 TPS
 
 #[derive(Serialize, Deserialize, Debug, Clone, Hash)]
 pub struct Transaction {
@@ -17,6 +20,7 @@ pub struct Transaction {
     pub sender: String, // Public key or Alias
     pub receiver: String,
     pub amount: u64,
+    pub shard_id: u16, // New scaling field
     pub timestamp: u64,
     pub signature: String,
 }
@@ -32,6 +36,30 @@ impl Transaction {
     }
 }
 
+/// A Receipt proves that a transaction was executed on a Source Shard
+/// and funds were burned/locked, allowing the Destination Shard to mint/unlock them.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Receipt {
+    pub original_tx_id: String,
+    pub source_shard: u16,
+    pub target_shard: u16,
+    pub amount: u64,
+    pub receiver: String,
+    pub block_hash: String,        // Block on source shard where burn happened
+    pub merkle_proof: Vec<String>, // Proof of inclusion
+}
+
+/// Cross-Link is a summary of a Shard's block header, signed by the shard's committee,
+/// sent to the Beacon Chain for finalization.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CrossLink {
+    pub shard_id: u16,
+    pub block_height: u64,
+    pub block_hash: String,
+    pub state_root: String,
+    pub signature: String, // Aggregated BLS signature (simplified to string here)
+}
+
 pub fn calculate_fee(amount: u64) -> u64 {
     // 0.01% fee, minimum 0.001 AGT (1,000 units). Upward rounding.
     let fee = (amount as f64 * 0.0001).ceil() as u64;
@@ -43,14 +71,8 @@ pub fn calculate_mining_reward(index: u64) -> u64 {
         return GENESIS_SUPPLY;
     }
 
-    // Sprint Halving Logic
-    // First 5 halvings are fast (every 100k blocks)
-    // Then every 400k blocks
-    let halving_count = if index <= 500_000 {
-        index / HALVING_INTERVAL_EARLY
-    } else {
-        5 + (index - 500_000) / HALVING_INTERVAL_STABLE
-    };
+    // Standard Halving Logic (Bitcoin-like)
+    let halving_count = index / HALVING_INTERVAL;
 
     if halving_count >= 64 {
         0
@@ -61,46 +83,27 @@ pub fn calculate_mining_reward(index: u64) -> u64 {
 
 pub fn calculate_circulating_supply(height: u64) -> u64 {
     // Rough calculation based on fixed heights for UI performance
-    // In production, this would be indexed in a global state
     let mut supply = GENESIS_SUPPLY;
 
-    // This is an O(1) mathematical approximation for the UI
-    // For exact balance, use storage.calculate_balance on SYSTEM
     let mut current_reward = INITIAL_REWARD;
     let mut blocks_processed = 0;
 
-    // Fast Phase
-    for _ in 0..5 {
-        let blocks_in_period = if height > blocks_processed + HALVING_INTERVAL_EARLY {
-            HALVING_INTERVAL_EARLY
-        } else if height > blocks_processed {
-            height - blocks_processed
-        } else {
-            0
-        };
-        supply += blocks_in_period * current_reward;
-        blocks_processed += blocks_in_period;
-        current_reward /= 2;
-    }
-
-    // Stable Phase
-    if height > blocks_processed {
+    // We iterate through halving epochs until we reach current height
+    while blocks_processed < height {
         let remaining = height - blocks_processed;
-        let mut stable_reward = current_reward;
-        let mut stable_blocks = 0;
 
-        while stable_blocks < remaining {
-            let period_blocks = if remaining > stable_blocks + HALVING_INTERVAL_STABLE {
-                HALVING_INTERVAL_STABLE
-            } else {
-                remaining - stable_blocks
-            };
-            supply += period_blocks * stable_reward;
-            stable_blocks += period_blocks;
-            stable_reward /= 2;
-            if stable_reward == 0 {
-                break;
-            }
+        let blocks_in_epoch = if remaining > HALVING_INTERVAL {
+            HALVING_INTERVAL
+        } else {
+            remaining
+        };
+
+        supply += blocks_in_epoch * current_reward;
+        blocks_processed += blocks_in_epoch;
+        current_reward /= 2;
+
+        if current_reward == 0 {
+            break;
         }
     }
 
@@ -162,6 +165,8 @@ pub struct Block {
     pub nonce: u64,
     pub vdf_difficulty: u64,
     pub size: u64,
+    #[serde(default)] // Default for backward compatibility
+    pub shard_id: u32,
 
     // Economic Metadata
     pub total_fees: u64,
@@ -177,6 +182,7 @@ impl Block {
         previous_hash: String,
         weight: u64,
         vdf_difficulty: u64,
+        shard_id: u32,
         total_fees: u64,
         block_reward: u64,
     ) -> Self {
@@ -187,7 +193,7 @@ impl Block {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            author,
+            author: author.clone(),
             transactions,
             previous_hash,
             hash: String::new(),
@@ -204,6 +210,7 @@ impl Block {
             total_fees,
             block_reward,
             total_reward: total_fees + block_reward,
+            shard_id,
         };
         block.size = block.calculate_size();
         block.hash = block.calculate_hash();
@@ -249,14 +256,16 @@ impl Block {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncRequest {
-    GetBlock(u64), // Request block by Index
-    GetHeight,     // Request current chain height
-    GetMempool,    // Request current pending transactions
+    GetBlock(u64),            // Request block by Index
+    GetBlocksRange(u64, u64), // Request range of blocks (Start, End) inclusive
+    GetHeight,                // Request current chain height
+    GetMempool,               // Request current pending transactions
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum SyncResponse {
     Block(Option<Block>),
+    BlocksBatch(Vec<Block>),
     Height(u64),
     Mempool(Vec<Transaction>),
 }
@@ -280,6 +289,7 @@ mod tests {
             sender: "a".to_string(),
             receiver: "b".to_string(),
             amount: 100,
+            shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
         };
@@ -299,6 +309,7 @@ mod tests {
             sender: "a".to_string(),
             receiver: "b".to_string(),
             amount: 100,
+            shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
         };
@@ -307,6 +318,7 @@ mod tests {
             sender: "a".to_string(),
             receiver: "b".to_string(),
             amount: 200,
+            shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
         };

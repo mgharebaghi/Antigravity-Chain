@@ -36,7 +36,7 @@ use tower_http::cors::{Any, CorsLayer};
 struct AppState {
     storage: Arc<Storage>,
     mempool: Arc<Mempool>,
-    consensus: Arc<Mutex<Consensus>>,
+    _consensus: Arc<Mutex<Consensus>>,
     chain_index: Arc<AtomicU64>,
     peer_count: Arc<std::sync::atomic::AtomicUsize>,
     tx_sender: tokio::sync::mpsc::Sender<Transaction>, // To submit tx to P2P
@@ -150,9 +150,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/9091".parse()?)?; // Use 9091 to allow running alongside Relay (9090)
 
     // Connect to local relay if valid (assuming default)
-    let relay_addr = "/ip4/127.0.0.1/tcp/9090";
-    if let Ok(addr) = relay_addr.parse::<Multiaddr>() {
-        let _ = swarm.dial(addr);
+    let relay_addr_str = "/ip4/127.0.0.1/tcp/9090";
+    if let Ok(addr) = relay_addr_str.parse::<Multiaddr>() {
+        log::info!("RPC Node dialing Relay at {}", addr);
+        if let Err(e) = swarm.dial(addr.clone()) {
+            log::error!("Failed to dial relay: {}", e);
+        } else {
+            // Add relay as DHT bootstrap node
+            if let Some(relay_peer_id) = addr.iter().find_map(|p| match p {
+                libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                _ => None,
+            }) {
+                log::info!("Adding Relay {} to DHT buckets", relay_peer_id);
+                swarm.behaviour_mut().kad.add_address(&relay_peer_id, addr);
+                swarm.behaviour_mut().kad.bootstrap()?;
+            }
+        }
     }
 
     // Shared refs for P2P loop
@@ -229,6 +242,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let b = p2p_storage.get_block(idx).unwrap_or(None);
                                         let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Block(b));
                                     },
+                                    SyncRequest::GetBlocksRange(start, end) => {
+                                        let mut blocks = Vec::new();
+                                        for i in start..=end {
+                                            if let Ok(Some(b)) = p2p_storage.get_block(i) {
+                                                blocks.push(b);
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::BlocksBatch(blocks));
+                                    },
                                     SyncRequest::GetMempool => {
                                         let txs = p2p_mempool.get_pending_transactions();
                                         let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Mempool(txs));
@@ -241,13 +265,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     SyncResponse::Block(Some(block)) => {
                                         if block.is_vdf_valid() {
                                             if let Ok(_) = p2p_storage.save_block(&block) {
-                                                 p2p_evt_sender.send(Event::NewBlock(block)).ok();
+                                                 p2p_evt_sender.send(Event::NewBlock(block.clone())).ok();
+                                                 p2p_chain_index.store(block.index, Ordering::Relaxed);
                                             }
                                         }
                                     },
-                                    _ => {}
+                                    SyncResponse::Block(None) => {},
+                                    SyncResponse::BlocksBatch(blocks) => {
+                                        for block in blocks {
+                                            if block.is_vdf_valid() {
+                                                if let Ok(_) = p2p_storage.save_block(&block) {
+                                                     p2p_evt_sender.send(Event::NewBlock(block.clone())).ok();
+                                                     p2p_chain_index.store(block.index, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                    },
+                                    SyncResponse::Mempool(_m) => {},
                                 }
-                            }
+                            },
                         }
                     }
                     SwarmEvent::ConnectionEstablished { .. } | SwarmEvent::ConnectionClosed { .. } => {
@@ -263,7 +299,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = Arc::new(AppState {
         storage,
         mempool,
-        consensus,
+        _consensus: consensus,
         chain_index,
         peer_count,
         tx_sender: tx_submit_sender,
@@ -389,18 +425,9 @@ async fn get_network_stats(State(state): State<Arc<AppState>>) -> Json<NetworkSt
     let reward = tauri_appantigravity_chain_lib::chain::calculate_mining_reward(height + 1);
 
     // Calculate simple halving info
-    let (_halving_interval, _phase) = if height <= 500_000 {
-        (100_000, "Early")
-    } else {
-        (400_000, "Stable")
-    };
-
-    // This is rough estimation for "next halving", logic mirrors chain::calculate_mining_reward
-    let next_halving = if height <= 500_000 {
-        ((height / 100_000) + 1) * 100_000
-    } else {
-        500_000 + ((height - 500_000) / 400_000 + 1) * 400_000
-    };
+    let current_interval = height / tauri_appantigravity_chain_lib::chain::HALVING_INTERVAL;
+    let next_halving =
+        (current_interval + 1) * tauri_appantigravity_chain_lib::chain::HALVING_INTERVAL;
 
     Json(NetworkStats {
         supply,

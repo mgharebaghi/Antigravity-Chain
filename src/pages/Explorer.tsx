@@ -171,6 +171,8 @@ export default function Explorer() {
                             <tr className="border-b border-border/50 bg-secondary/10">
                                 <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-28">Height</th>
                                 <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground">Block Hash</th>
+                                <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-20 text-center">Shard</th>
+                                <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-24 text-center">VDF</th>
                                 <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-32">Proposer</th>
                                 <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-24 text-right">Txs</th>
                                 <th className="p-5 text-[10px] font-black uppercase tracking-widest text-muted-foreground w-32 text-right">Age</th>
@@ -203,6 +205,20 @@ export default function Explorer() {
                                                     {block.hash}
                                                 </span>
                                             </div>
+                                        </td>
+                                        <td className="p-5 text-center">
+                                            <Badge variant="outline" className="bg-primary/5 border-primary/20 text-primary font-mono text-[10px]">
+                                                #{block.shard_id ?? 0}
+                                            </Badge>
+                                        </td>
+                                        <td className="p-5 text-center">
+                                            {block.vdf_proof ? (
+                                                <Badge variant="secondary" className="font-mono text-[9px] opacity-70">
+                                                    PROOF
+                                                </Badge>
+                                            ) : (
+                                                <span className="text-[9px] text-muted-foreground">-</span>
+                                            )}
                                         </td>
                                         <td className="p-5">
                                             <div className="flex items-center gap-2">

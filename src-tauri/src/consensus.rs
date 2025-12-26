@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -132,14 +133,14 @@ impl Consensus {
         }
     }
 
-    // Select leader for a specific round/timeslot
-    pub fn select_leader(&self) -> Option<String> {
+    // Select leader for a specific round/timeslot (Beacon Chain Logic)
+    pub fn select_beacon_leader(&self) -> Option<String> {
         let mut best_node = None;
         let mut max_weight = -1.0;
 
         for (peer_id, _) in &self.nodes {
             let weight = self.calculate_patience_weight(peer_id);
-            println!("Consensus: Node {} weight: {}", peer_id, weight);
+            // println!("Consensus: Node {} weight: {}", peer_id, weight);
             if weight > max_weight {
                 max_weight = weight;
                 best_node = Some(peer_id.clone());
@@ -147,4 +148,118 @@ impl Consensus {
         }
         best_node
     }
+
+    // AHSP Phase 1: Dynamic Sharding Calculations
+
+    /// Calculates the number of active shards based on validator population.
+    /// Formula: max(1, validators / 50)
+    pub fn calculate_active_shards(&self) -> u16 {
+        let validator_count = self.nodes.len();
+        if validator_count < 50 {
+            1
+        } else {
+            (validator_count / 50) as u16
+        }
+    }
+
+    /// Deterministically assigns a peer to a specific shard.
+    /// Uses SHA-256 for secure randomness to prevent "grinding" attacks.
+    pub fn get_assigned_shard(&self, peer_id: &str, epoch_seed: u64) -> u16 {
+        let active_shards = self.calculate_active_shards();
+
+        // Use SHA-256 for secure checking
+        use sha2::{Digest, Sha256};
+
+        let mut hasher = Sha256::new();
+        hasher.update(peer_id.as_bytes());
+        hasher.update(&epoch_seed.to_le_bytes()); // Incorporate randomness
+        let result = hasher.finalize();
+
+        // Take first 2 bytes for u16 modulo
+        let hash_val = ((result[0] as u16) << 8) | (result[1] as u16);
+
+        // Modulo assignment
+        hash_val % active_shards
+    }
+
+    pub fn get_node_status(&self, peer_id: &String) -> NodeConsensusStatus {
+        // 1. Check if node exists
+        let node = match self.nodes.get(peer_id) {
+            Some(n) => n,
+            None => {
+                return NodeConsensusStatus {
+                    state: "Connecting".to_string(),
+                    queue_position: 0,
+                    estimated_blocks: 0,
+                    patience_progress: 0.0,
+                    remaining_seconds: 0,
+                }
+            }
+        };
+
+        // 2. Determine Logic Source of Truth
+        // Instead of recalculating sort, we ask who the consensus thinks is the leader RIGHT NOW.
+        let actual_leader = self.select_beacon_leader();
+        let is_leader = actual_leader.as_ref() == Some(peer_id);
+
+        // Calculate uptime for patience check
+        let uptime = node.current_uptime();
+
+        // 3. Determine Queue Position (for fallback)
+        // Calculate weights for all nodes to find rank
+        let mut weights: Vec<(&String, f64)> = self
+            .nodes
+            .keys()
+            .map(|pid| (pid, self.calculate_patience_weight(pid)))
+            .collect();
+
+        // Sort descending by weight
+        weights.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        // Find my position
+        let position = weights
+            .iter()
+            .position(|(pid, _)| *pid == peer_id)
+            .unwrap_or(0);
+
+        // 4. Status Decision Tree
+        if is_leader {
+            // Priority 1: If consensus says I am leader, I am Leader.
+            NodeConsensusStatus {
+                state: "Leader".to_string(),
+                queue_position: 1, // Look good
+                estimated_blocks: 0,
+                patience_progress: 1.0,
+                remaining_seconds: 0,
+            }
+        } else if !node.is_verified && uptime < self.quarantine_duration {
+            // Priority 2: If I am not leader, and I am in quarantine, show Patience status
+            let progress = uptime as f64 / self.quarantine_duration as f64;
+            NodeConsensusStatus {
+                state: "Patience".to_string(),
+                queue_position: (position + 1) as u32,
+                estimated_blocks: (self.quarantine_duration - uptime) as u32 / 2,
+                patience_progress: progress as f32,
+                remaining_seconds: (self.quarantine_duration - uptime),
+            }
+        } else {
+            // Priority 3: Normal Queue
+            NodeConsensusStatus {
+                state: "Queue".to_string(),
+                queue_position: (position + 1) as u32,
+                estimated_blocks: position as u32, // Simplified: 1 block per person ahead
+                patience_progress: 1.0,
+                remaining_seconds: (position * 2) as u64, // Approx 2s per block
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConsensusStatus {
+    pub state: String, // "Leader", "Queue", "Patience"
+    pub queue_position: u32,
+    pub estimated_blocks: u32,
+    pub patience_progress: f32, // 0.0 to 1.0
+    pub remaining_seconds: u64,
 }

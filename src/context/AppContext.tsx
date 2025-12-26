@@ -36,6 +36,7 @@ export interface Block {
     merkle_root?: string;
     state_root?: string;
     nonce?: number;
+    shard_id?: number;
 }
 
 export interface VdfStatus {
@@ -44,10 +45,27 @@ export interface VdfStatus {
     is_active: boolean;
 }
 
+export interface SelfNodeInfo {
+    peer_id: string;
+    addresses: string[];
+    shard_id: number;
+    total_shards: number;
+    shard_tps_limit: number;
+    global_tps_capacity: number;
+}
+
 export interface WalletExport {
     address: string;
     private_key: string;
     mnemonic: string;
+}
+
+export interface NodeConsensusStatus {
+    state: string; // "Leader", "Queue", "Patience"
+    queue_position: number;
+    estimated_blocks: number;
+    patience_progress: number;
+    remaining_seconds: number;
 }
 
 interface AppContextType {
@@ -66,6 +84,8 @@ interface AppContextType {
     refreshBlockHeight: () => Promise<void>;
     connectedRelay: string | null;
     vdfStatus: VdfStatus | null;
+    selfNodeInfo: SelfNodeInfo | null;
+    consensusStatus: NodeConsensusStatus | null;
     startNode: () => Promise<void>;
     stopNode: () => Promise<void>;
     logout: () => Promise<void>;
@@ -90,6 +110,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const [totalBlocks, setTotalBlocks] = useState<number>(0);
     const [height, setHeight] = useState<number>(0);
     const [vdfStatus, setVdfStatus] = useState<VdfStatus | null>(null);
+    const [selfNodeInfo, setSelfNodeInfo] = useState<SelfNodeInfo | null>(null);
+    const [consensusStatus, setConsensusStatus] = useState<NodeConsensusStatus | null>(null);
 
     // Initial load
     useEffect(() => {
@@ -158,6 +180,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 setPatience(prev => prev + 1);
                 // Also poll block height here periodically
                 refreshBlockHeight();
+                refreshSelfNodeInfo();
             }, 1000);
         }
         return () => clearInterval(interval);
@@ -194,6 +217,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
             setMinedBlocks(count);
         } catch (e) {
             console.error("Failed to fetch block info", e);
+        }
+    };
+
+    const refreshSelfNodeInfo = async () => {
+        try {
+            const info = await invoke<SelfNodeInfo | null>("get_self_node_info");
+            setSelfNodeInfo(info);
+            // Also fetch real-time consensus status
+            const status = await invoke<NodeConsensusStatus>("get_consensus_status");
+            setConsensusStatus(status);
+        } catch (e) {
+            console.warn("Failed to fetch node info/status", e);
         }
     };
 
@@ -300,7 +335,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
             logout,
             exitApp, // Expose exit
             createWallet,
-            importWallet
+            importWallet,
+            selfNodeInfo,
+            consensusStatus
         }}>
             {children}
         </AppContext.Provider>

@@ -1,6 +1,7 @@
 use futures::StreamExt;
+use libp2p::multiaddr::Protocol;
 use libp2p::{
-    gossipsub, identity, kad, mdns, noise,
+    gossipsub, identity, kad, mdns, noise, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, SwarmBuilder,
 };
@@ -41,23 +42,32 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
+#[derive(Debug)]
+pub enum P2PCommand {
+    SyncWithNetwork,
+}
+
 pub async fn start_p2p_node(
     app_handle: AppHandle,
     storage: Arc<Storage>,
     mempool: Arc<Mempool>,
-    consensus: Arc<Mutex<Consensus>>, // Added Consensus
+    consensus: Arc<Mutex<Consensus>>,
     is_synced: Arc<AtomicBool>,
     is_running: Arc<AtomicBool>,
     run_id: Arc<std::sync::atomic::AtomicU64>,
     peer_count: Arc<AtomicUsize>,
-    chain_index: Arc<std::sync::atomic::AtomicU64>, // Renamed for clarity
-    relay_addr: String,                             // Added for dynamic config
+    validator_count: Arc<AtomicUsize>,
+    chain_index: Arc<std::sync::atomic::AtomicU64>,
+    relay_addr: String,
     my_run_id: u64,
     mut block_receiver: tokio::sync::mpsc::Receiver<Box<crate::chain::Block>>,
     mut tx_receiver: tokio::sync::mpsc::Receiver<crate::chain::Transaction>,
+    mut receipt_receiver: tokio::sync::mpsc::Receiver<crate::chain::Receipt>,
     node_type: Arc<Mutex<crate::NodeType>>,
+    wallet_keypair: Option<identity::Keypair>,
+    mut cmd_rx: tokio::sync::mpsc::Receiver<P2PCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let local_key = identity::Keypair::generate_ed25519();
+    let local_key = wallet_keypair.unwrap_or_else(identity::Keypair::generate_ed25519);
     let local_peer_id = PeerId::from(local_key.public());
     log::info!("Local peer id: {:?}", local_peer_id);
 
@@ -140,19 +150,32 @@ pub async fn start_p2p_node(
         .build();
 
     // Subscribe to topics
-    let topic_blocks = gossipsub::IdentTopic::new("antigravity-blocks");
-    let topic_transactions = gossipsub::IdentTopic::new("antigravity-transactions");
+    // Dynamic Shard Subscription
+    let shard_id = {
+        let c = consensus.lock().unwrap();
+        c.get_assigned_shard(&local_peer_id.to_string(), 0)
+    };
+    log::info!("P2P: Subscribing to Shard #{} topics", shard_id);
 
-    swarm.behaviour_mut().gossipsub.subscribe(&topic_blocks)?;
+    let topic_shard_blocks =
+        gossipsub::IdentTopic::new(format!("antigravity-shard-{}-blocks", shard_id));
+    let topic_shard_txs = gossipsub::IdentTopic::new(format!("antigravity-shard-{}-txs", shard_id));
+    let topic_receipts = gossipsub::IdentTopic::new("antigravity-receipts");
+
     swarm
         .behaviour_mut()
         .gossipsub
-        .subscribe(&topic_transactions)?;
+        .subscribe(&topic_shard_blocks)?;
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic_shard_txs)?;
+    swarm.behaviour_mut().gossipsub.subscribe(&topic_receipts)?;
 
     // Listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // Attempt to dial the hardcoded relay
+    // Attempt to dial the configured relay
     let relay_addr_parsed: libp2p::Multiaddr = relay_addr.parse()?;
 
     // Bootnodes (Placeholder)
@@ -179,7 +202,26 @@ pub async fn start_p2p_node(
     }
 
     match swarm.dial(relay_addr_parsed.clone()) {
-        Ok(_) => log::info!("Dialing relay..."),
+        Ok(_) => {
+            log::info!("Dialing relay: {}", relay_addr_parsed);
+            // Reservation: This allows other nodes to reach us via the relay
+            if let Err(e) = swarm.listen_on(relay_addr_parsed.clone().with(Protocol::P2pCircuit)) {
+                log::error!("Failed to listen on relay circuit: {}", e);
+            } else {
+                log::info!("Listening on relay circuit for incoming P2P connections.");
+            }
+
+            // Add relay to Kademlia as a bootstrap point
+            if let Some(relay_peer_id) = relay_addr_parsed.iter().find_map(|p| match p {
+                Protocol::P2p(id) => Some(id),
+                _ => None,
+            }) {
+                swarm
+                    .behaviour_mut()
+                    .kad
+                    .add_address(&relay_peer_id, relay_addr_parsed.clone());
+            }
+        }
         Err(e) => {
             log::error!("Failed to dial relay: {}", e);
             let _ = app_handle.emit("relay-status", "disconnected");
@@ -188,6 +230,11 @@ pub async fn start_p2p_node(
 
     let _ = app_handle.emit("relay-status", "Connecting...");
     let _ = app_handle.emit("node-status", "Connecting");
+
+    let relay_peer_id_opt = relay_addr_parsed.iter().find_map(|p| match p {
+        Protocol::P2p(id) => Some(id),
+        _ => None,
+    });
 
     // Event Loop
     let mut check_interval = tokio::time::interval(Duration::from_secs(1));
@@ -200,38 +247,94 @@ pub async fn start_p2p_node(
         }
 
         tokio::select! {
+            // 1. Handle Commands from Lib (e.g. Start Sync)
+            Some(cmd) = cmd_rx.recv() => {
+                 match cmd {
+                     P2PCommand::SyncWithNetwork => {
+                         log::info!("P2P: Received Sync Command. Contacting peers...");
+                         // Broadcast GetHeight to all connected peers AND closest DHT peers
+                         let connected_peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+                         let targets = connected_peers.clone();
+
+                         // Also try to reach out to peers in the DHT that we might not be fully connected to yet
+                         // This is crucial for initial discovery if gossip hasn't established mesh yet
+                         if let Some(relay_id) = relay_peer_id_opt {
+                             let _scan_query = swarm.behaviour_mut().kad.get_closest_peers(relay_id);
+                             // We can't easily wait for query results here in this matching block,
+                             // but we can ensure we are querying.
+                             // For now, rely on `connected_peers` which should be populated by the relay connection logic + bootstrapper.
+                         }
+
+                         if targets.is_empty() {
+                             log::warn!("P2P Sync: No peers connected.");
+                         } else {
+                             for peer in targets {
+                                 if Some(peer) == relay_peer_id_opt { continue; }
+                                 log::info!("P2P Sync: Requesting Height from {:?}", peer);
+                                 swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                             }
+                         }
+                     }
+                 }
+            }
+
+            // Periodic Sync Check for New Nodes
+            _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                 // If we are NOT synced, keep asking
+                 if !is_synced.load(Ordering::Relaxed) {
+                     let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
+                     for peer in peers {
+                         if Some(peer) == relay_peer_id_opt { continue; }
+                         swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                     }
+                 }
+            }
+
             _ = check_interval.tick() => {
                  let count = swarm.network_info().num_peers();
                  peer_count.store(count, Ordering::Relaxed);
                  let _ = app_handle.emit("peer-count", count);
+
+                 let connected_peers = swarm.connected_peers().collect::<Vec<_>>();
+                 let mut v_count = 0;
+                 for pid in connected_peers {
+                     if Some(*pid) != relay_peer_id_opt {
+                         v_count += 1;
+                     }
+                 }
+                 validator_count.store(v_count, Ordering::Relaxed);
+                 let _ = app_handle.emit("validator-count", v_count);
             }
+
             Some(block) = block_receiver.recv() => {
                  log::info!("Broadcasting mined block index: {}", block.index);
                  let json = serde_json::to_vec(&*block).unwrap();
-                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_blocks.clone(), json) {
+                 if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_shard_blocks.clone(), json) {
                      log::error!("Gossip block publish error: {:?}", e);
                  }
             }
+
             Some(tx) = tx_receiver.recv() => {
                 log::info!("Broadcasting local transaction: {}", tx.id);
                 let json = serde_json::to_vec(&tx).unwrap();
-                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_transactions.clone(), json) {
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_shard_txs.clone(), json) {
                     log::error!("Gossip tx publish error: {:?}", e);
                 }
             }
+
+            Some(receipt) = receipt_receiver.recv() => {
+                log::info!("Broadcasting Cross-Shard Receipt: {}", receipt.original_tx_id);
+                let json = serde_json::to_vec(&receipt).unwrap();
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_receipts.clone(), json) {
+                    log::error!("Gossip receipt publish error: {:?}", e);
+                }
+            }
+
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     log::info!("Local node is listening on {:?}", address);
-                    let mut c = consensus.lock().unwrap();
-                    if let Some(id) = c.local_peer_id.clone() {
-                        if let Some(node) = c.nodes.get_mut(&id) {
-                            let addr_str = address.to_string();
-                            if !node.addresses.contains(&addr_str) {
-                                node.addresses.push(addr_str);
-                            }
-                        }
-                    }
                 }
+
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Identify(libp2p::identify::Event::Received {
                     peer_id,
                     info,
@@ -241,70 +344,9 @@ pub async fn start_p2p_node(
                     let mut c = consensus.lock().unwrap();
                     let pid_str = peer_id.to_string();
                     let node = c.nodes.entry(pid_str.clone()).or_insert_with(|| crate::consensus::NodeState::new(pid_str));
-                    for addr in info.listen_addrs {
-                        let addr_str = addr.to_string();
-                        if !node.addresses.contains(&addr_str) {
-                            node.addresses.push(addr_str);
-                        }
-                    }
+                    node.addresses = info.listen_addrs.iter().map(|a| a.to_string()).collect();
                 }
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Gossipsub(
-                    gossipsub::Event::Message {
-                        propagation_source: peer_id,
-                        message,
-                        ..
-                    },
-                )) => {
-                   let topic_hash = message.topic.clone();
-                   let payload = message.data;
-                   if topic_hash == topic_blocks.hash() {
-                       log::info!("Received BLOCK from {:?}", peer_id);
-                       if let Ok(block) = serde_json::from_slice::<Block>(&payload) {
-                           if !block.is_vdf_valid() {
-                               log::error!("VDF VALIDATION FAILED on block #{} from {:?}", block.index, peer_id);
-                           } else {
-                               log::info!("Block index: {}, txs: {}", block.index, block.transactions.len());
-                               if storage.get_block(block.index).unwrap_or(None).is_none() {
-                                   if let Err(e) = storage.save_block(&block) {
-                                       log::error!("Failed to save block: {}", e);
-                                   } else {
-                                        // Pruning logic
-                                        let nt = {
-                                            let guard = node_type.lock().unwrap();
-                                            guard.clone()
-                                        };
-                                        if nt == crate::NodeType::Pruned {
-                                            let _ = storage.prune_history(2000);
-                                        }
 
-                                        let cur = chain_index.load(Ordering::Relaxed);
-                                        if block.index > cur {
-                                            chain_index.store(block.index, Ordering::Relaxed);
-                                        }
-
-                                        let tx_ids: Vec<String> = block.transactions.iter().map(|tx| tx.id.clone()).collect();
-                                        mempool.remove_transactions(&tx_ids);
-                                        let _ = app_handle.emit("new-block", block);
-                                   }
-                               }
-                           }
-                       }
-                   } else if topic_hash == topic_transactions.hash() {
-                       log::info!("Received TX from {:?}", peer_id);
-                       if let Ok(tx) = serde_json::from_slice::<Transaction>(&payload) {
-                           let sender_balance = storage.calculate_balance(&tx.sender).unwrap_or(0);
-                           let required = tx.amount.saturating_add(crate::chain::calculate_fee(tx.amount));
-
-                           if sender_balance < required {
-                               log::warn!("Rejected tx {}: Insufficient funds", tx.id);
-                           } else if let Err(e) = mempool.add_transaction(tx.clone()) {
-                               log::warn!("Rejected tx: {}", e);
-                           } else {
-                                let _ = app_handle.emit("new-transaction", tx);
-                           }
-                       }
-                   }
-                }
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
@@ -312,12 +354,37 @@ pub async fn start_p2p_node(
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
+
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
+
+                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message {
+                        propagation_source: peer_id,
+                        message,
+                        ..
+                    },
+                )) => {
+                    if message.topic.as_str() == topic_shard_blocks.hash().as_str() {
+                         if let Ok(block) = serde_json::from_slice::<Block>(&message.data) {
+                              log::info!("Received Gossip Block #{} from {}", block.index, peer_id);
+                              if let Ok(_) = storage.save_block(&block) {
+                                  chain_index.store(block.index, Ordering::Relaxed);
+                                  let _ = app_handle.emit("new-block", block);
+                              }
+                         }
+                    } else if message.topic.as_str() == topic_shard_txs.hash().as_str() {
+                         if let Ok(tx) = serde_json::from_slice::<Transaction>(&message.data) {
+                             let _ = mempool.add_transaction(tx.clone());
+                             let _ = app_handle.emit("new-transaction", tx);
+                         }
+                    }
+                }
+
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Sync(
                     libp2p::request_response::Event::Message { peer, message, .. },
                 )) => match message {
@@ -331,6 +398,17 @@ pub async fn start_p2p_node(
                                 let block_opt = storage.get_block(index).unwrap_or(None);
                                 let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Block(block_opt));
                             }
+                            SyncRequest::GetBlocksRange(start, end) => {
+                                let mut blocks = Vec::new();
+                                for i in start..=end {
+                                    if let Ok(Some(b)) = storage.get_block(i) {
+                                        blocks.push(b);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::BlocksBatch(blocks));
+                            }
                             SyncRequest::GetMempool => {
                                 let txs = mempool.get_pending_transactions();
                                 let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Mempool(txs));
@@ -339,29 +417,72 @@ pub async fn start_p2p_node(
                     }
                     libp2p::request_response::Message::Response { response, .. } => {
                         match response {
-                            SyncResponse::Height(h) => {
-                                if h > 0 {
-                                    let _ = app_handle.emit("node-status", "Syncing");
+                            SyncResponse::Height(remote_height) => {
+                                let local_height = chain_index.load(Ordering::Relaxed);
+                                let total_blocks = storage.get_total_blocks().unwrap_or(0);
+                                log::info!("P2P Sync: Remote Height {}, Local Height {}, Total Blocks {}", remote_height, local_height, total_blocks);
+
+                                // Adjust start: If we have 0 blocks, we need block 0.
+                                let start = if total_blocks == 0 { 0 } else { local_height + 1 };
+
+                                if remote_height >= start {
+                                    let end = (start + 100).min(remote_height);
+                                    let _ = app_handle.emit("node-status", format!("Batch Syncing {}..{}", start, end));
+                                    swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetBlocksRange(start, end));
                                 } else {
-                                    is_synced.store(true, Ordering::Relaxed);
-                                    let _ = app_handle.emit("node-status", "Active");
+                                    // If we are at the same height or ahead, AND we have at least one block, we are synced.
+                                    if !is_synced.load(Ordering::Relaxed) {
+                                        if total_blocks > 0 {
+                                            log::info!("P2P Sync: Local chain detected (Height {}). Remote is {}. Marked as Synced.", local_height, remote_height);
+                                            is_synced.store(true, Ordering::Relaxed);
+                                            let _ = app_handle.emit("node-status", "Active");
+                                        } else if remote_height > 0 {
+                                            // Remote has blocks, we have 0. WE MUST SYNC.
+                                             log::info!("P2P Sync: Local is empty, Remote is at {}. requesting genesis...", remote_height);
+                                             swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetBlocksRange(0, 50));
+                                        } else {
+                                           log::warn!("P2P Sync: Both Local and Remote are empty (Genesis pending). Waiting...");
+                                        }
+                                    }
                                 }
-                                let _ = swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetMempool);
                             }
-                            SyncResponse::Block(b) => {
-                                if let Some(block) = b {
-                                     if storage.get_block(block.index).unwrap_or(None).is_none() {
-                                         if let Ok(_) = storage.save_block(&block) {
-                                             let nt = {
-                                                 let guard = node_type.lock().unwrap();
-                                                 guard.clone()
-                                             };
-                                             if nt == crate::NodeType::Pruned {
-                                                 let _ = storage.prune_history(2000);
-                                             }
-                                             let _ = app_handle.emit("new-block", block);
-                                         }
-                                     }
+                            SyncResponse::BlocksBatch(blocks) => {
+                                let mut last_idx = 0;
+                                for block in blocks {
+                                    last_idx = block.index;
+                                    log::info!("P2P Sync: Batch Received Block #{}", block.index);
+                                    if storage.get_block(block.index).unwrap_or(None).is_none() {
+                                        if let Ok(_) = storage.save_block(&block) {
+                                            chain_index.store(block.index, Ordering::Relaxed);
+                                            let _ = app_handle.emit("new-block", block);
+                                        }
+                                    }
+                                }
+                                // Request next batch or check height again
+                                log::info!("P2P Sync: Batch processed up to {}. Checking height...", last_idx);
+                                swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                            }
+                            SyncResponse::Block(Some(block)) => {
+                                log::info!("P2P Sync: Received Block #{}", block.index);
+                                 if storage.get_block(block.index).unwrap_or(None).is_none() {
+                                    if let Ok(_) = storage.save_block(&block) {
+                                        chain_index.store(block.index, Ordering::Relaxed);
+                                        let _ = app_handle.emit("new-block", block.clone());
+                                        let _ = app_handle.emit("node-status", format!("Synced Block #{}", block.index));
+
+                                        // Pruning
+                                        let nt = {
+                                            let guard = node_type.lock().unwrap();
+                                            guard.clone()
+                                        };
+                                        if nt == crate::NodeType::Pruned {
+                                            let _ = storage.prune_history(2000);
+                                        }
+
+                                        if block.index % 50 == 0 {
+                                             swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                                        }
+                                    }
                                 }
                             }
                             SyncResponse::Mempool(txs) => {
@@ -369,23 +490,24 @@ pub async fn start_p2p_node(
                                     let _ = mempool.add_transaction(tx);
                                 }
                             }
+                            _ => {}
                         }
                     }
                 },
+
                 SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                     let remote_addr = endpoint.get_remote_address().to_string();
                     if endpoint.is_dialer() && remote_addr.contains(&relay_addr) {
                         log::info!("Relay connection established with {}", peer_id);
                         let _ = app_handle.emit("relay-status", "connected");
                         let _ = app_handle.emit("relay-info", peer_id.to_string());
-                        // Explicitly remove relay from consensus nodes if it was added via Identify/Mdns
                         consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
                     } else {
-                        // Only register non-relay nodes in consensus
                         consensus.lock().unwrap().register_node(peer_id.to_string());
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
+
                 SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
                     let remote_addr = endpoint.get_remote_address().to_string();
                     if remote_addr.contains(&relay_addr) {
@@ -394,11 +516,25 @@ pub async fn start_p2p_node(
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Kad(kad::Event::RoutingUpdated { .. })) => {
+
+                SwarmEvent::Behaviour(AntigravityBehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { .. })) => {
+                    log::info!("Relay reservation accepted! Visible to network.");
+                    let _ = app_handle.emit("relay-status", "connected");
+                }
+                SwarmEvent::Behaviour(AntigravityBehaviourEvent::RelayClient(relay::client::Event::ReservationReqFailed { error, .. })) => {
+                    log::error!("Relay reservation failed: {:?}", error);
+                    let _ = app_handle.emit("relay-status", "reservation-failed");
+                }
+                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
+                     log::info!("Kademlia: Routing updated for peer {}", peer);
+                     // If we just found a peer via DHT, try to sync with them immediately if we are not synced
+                     if !is_synced.load(Ordering::Relaxed) && Some(peer) != relay_peer_id_opt {
+                         swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                     }
                      peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
                 _ => {}
-            },
+            }
         }
     }
     Ok(())

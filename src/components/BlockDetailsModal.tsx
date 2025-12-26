@@ -43,6 +43,9 @@ export default function BlockDetailsModal({ block, onClose, onTxClick }: BlockDe
                                 <h2 className="text-xl font-bold flex items-center gap-2">
                                     Block #{formatNumber(block.index, false)}
                                     <Badge variant="outline" className="text-[10px] font-normal h-5">v{block.version || 1}</Badge>
+                                    <Badge variant="secondary" className="text-[10px] font-mono h-5 bg-primary/10 text-primary border-primary/20">
+                                        Shard #{block.shard_id ?? 0}
+                                    </Badge>
                                 </h2>
                                 <p className="text-xs text-muted-foreground">Detailed historical record</p>
                             </div>
@@ -105,6 +108,20 @@ export default function BlockDetailsModal({ block, onClose, onTxClick }: BlockDe
                                     <div>
                                         <span className="text-[10px] font-bold text-muted-foreground block mb-1.5 uppercase tracking-wide">Merkle Root</span>
                                         <code className="text-[10px] font-mono block truncate bg-background p-2 rounded-lg border border-border/50 text-foreground/80">{block.merkle_root || "N/A"}</code>
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] font-bold text-muted-foreground block mb-1.5 uppercase tracking-wide">VDF Proof</span>
+                                        <div className="flex items-center gap-2 bg-background p-2 rounded-lg border border-border/50">
+                                            <code className="text-[10px] font-mono truncate text-foreground/80 flex-1">{block.vdf_proof || "N/A"}</code>
+                                            {block.vdf_proof && (
+                                                <button
+                                                    onClick={() => navigator.clipboard.writeText(block.vdf_proof!)}
+                                                    className="p-1 hover:bg-muted rounded text-muted-foreground hover:text-foreground"
+                                                >
+                                                    <Copy className="w-3 h-3" />
+                                                </button>
+                                            )}
+                                        </div>
                                     </div>
                                     <div>
                                         <span className="text-[10px] font-bold text-muted-foreground block mb-1.5 uppercase tracking-wide">State Root</span>

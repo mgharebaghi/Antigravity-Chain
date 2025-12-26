@@ -1,15 +1,17 @@
 use libp2p::{
     futures::StreamExt,
-    identity, noise, relay,
+    identity, kad, noise, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, SwarmBuilder,
 };
 use std::error::Error;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 #[derive(NetworkBehaviour)]
 struct RelayServerBehaviour {
     relay: relay::Behaviour,
+    kad: kad::Behaviour<kad::store::MemoryStore>,
     identify: libp2p::identify::Behaviour,
     ping: libp2p::ping::Behaviour,
 }
@@ -17,14 +19,20 @@ struct RelayServerBehaviour {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     flexi_logger::Logger::try_with_str("info")?.start()?;
+    log::info!("Starting Antigravity Relay Server (Bootstrap Node)...");
 
-    // 1. Generate keys
+    // 1. Generate keys (In production, load these from file!)
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    println!("Relay Node ID: {:?}", local_peer_id);
+    log::info!("Relay Node ID: {:?}", local_peer_id);
 
-    // 2. Configure Relay
-    let relay_config = relay::Config::default();
+    // 2. Configure Relay (Circuit Relay v2)
+    let relay_config = relay::Config {
+        max_reservations: 1024,
+        max_circuits: 1024,
+        reservation_duration: Duration::from_secs(60 * 60), // 1 Hour
+        ..Default::default()
+    };
 
     // 3. Build Swarm
     let mut swarm = SwarmBuilder::with_existing_identity(local_key.clone())
@@ -36,33 +44,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )?
         .with_dns()?
         .with_behaviour(|key| {
+            // A. Relay Behaviour
             let relay_behaviour = relay::Behaviour::new(key.public().to_peer_id(), relay_config);
 
+            // B. Kademlia (Server Mode) - Crucial for storing peer records
+            let mut kad_config = kad::Config::default();
+            kad_config
+                .set_protocol_names(vec![libp2p::StreamProtocol::new("/antigravity/kad/1.0.0")]);
+            // Server mode is default for Kademlia, but let's be explicit if needed by adding addresses
+            let store = kad::store::MemoryStore::new(key.public().to_peer_id());
+            let kad_behaviour =
+                kad::Behaviour::with_config(key.public().to_peer_id(), store, kad_config);
+
+            // C. Identify
             let identify = libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
                 "/antigravity/relay/1.0.0".to_string(),
                 key.public(),
             ));
 
+            // D. Ping
             let ping = libp2p::ping::Behaviour::new(
-                libp2p::ping::Config::new().with_interval(std::time::Duration::from_secs(5)),
+                libp2p::ping::Config::new().with_interval(Duration::from_secs(5)),
             );
 
             Ok(RelayServerBehaviour {
                 relay: relay_behaviour,
+                kad: kad_behaviour,
                 identify,
                 ping,
             })
         })?
-        .with_swarm_config(|cfg| {
-            cfg.with_idle_connection_timeout(std::time::Duration::from_secs(u64::MAX))
-        })
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
     // 4. Listen on a specific port (e.g., 9090)
     let listen_addr: SocketAddr = "0.0.0.0:9090".parse()?;
     swarm.listen_on(format!("/ip4/{}/tcp/{}", listen_addr.ip(), listen_addr.port()).parse()?)?;
 
-    println!(
+    log::info!(
         "Relay server listening on /ip4/{}/tcp/{}",
         listen_addr.ip(),
         listen_addr.port()
@@ -72,21 +91,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => {
-                println!("Listening on {:?}", address);
+                log::info!("Listening on {:?}", address);
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
             } => {
-                println!("✅ Node connected: {:?} from {:?}", peer_id, endpoint);
+                log::info!("✅ Node connected: {:?} from {:?}", peer_id, endpoint);
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                println!("❌ Node disconnected: {:?} (cause: {:?})", peer_id, cause);
+                log::info!("❌ Node disconnected: {:?} (cause: {:?})", peer_id, cause);
             }
-            SwarmEvent::Behaviour(RelayServerBehaviourEvent::Relay(event)) => {
-                println!("🔄 Relay event: {:?}", event);
+            SwarmEvent::Behaviour(RelayServerBehaviourEvent::Relay(
+                relay::Event::ReservationReqAccepted { src_peer_id, .. },
+            )) => {
+                log::info!("Relay Reservation Accepted for: {}", src_peer_id);
             }
-            SwarmEvent::Behaviour(RelayServerBehaviourEvent::Identify(event)) => {
-                println!("🔍 Identify event: {:?}", event);
+            SwarmEvent::Behaviour(RelayServerBehaviourEvent::Kad(kad::Event::RoutingUpdated {
+                peer,
+                ..
+            })) => {
+                log::info!("DHT: Routing Table updated with peer {}", peer);
             }
             _ => {}
         }

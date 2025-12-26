@@ -138,7 +138,10 @@ export default function Settings() {
 
                     <div className="space-y-4">
                         <div className="space-y-2">
-                            <label className="text-xs font-semibold uppercase text-muted-foreground">Relay Address</label>
+                            <label className="text-xs font-semibold uppercase text-muted-foreground flex justify-between">
+                                Relay Address
+                                <span className="text-[10px] text-orange-500 font-bold">(Requires Node Restart)</span>
+                            </label>
                             <input
                                 type="text"
                                 value={settings.relay_address}

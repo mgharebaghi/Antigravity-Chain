@@ -34,7 +34,7 @@ interface PeerInfo {
 export default function Tokenomics() {
     const [tokenomics, setTokenomics] = useState<TokenomicsInfo | null>(null);
     const [peers, setPeers] = useState<PeerInfo[]>([]);
-    const { height } = useApp();
+    const { } = useApp();
 
     useEffect(() => {
         const fetchData = async () => {
@@ -78,14 +78,15 @@ export default function Tokenomics() {
 
     const timeToHalving = useMemo(() => {
         if (!tokenomics) return "Estimating...";
-        const totalSeconds = tokenomics.blocks_until_halving * 10;
-        const days = Math.floor(totalSeconds / (24 * 3600));
-        const hours = Math.floor((totalSeconds % (24 * 3600)) / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const totalSeconds = tokenomics.blocks_until_halving * 2; // 2.0s block time
 
+        const years = Math.floor(totalSeconds / (365 * 24 * 3600));
+        const days = Math.floor((totalSeconds % (365 * 24 * 3600)) / (24 * 3600));
+        const hours = Math.floor((totalSeconds % (24 * 3600)) / 3600);
+
+        if (years > 0) return `~${years}y ${days}d`;
         if (days > 0) return `${days}d ${hours}h`;
-        if (hours > 0) return `${hours}h ${minutes}m`;
-        return `${minutes}m`;
+        return `${hours}h ${Math.floor((totalSeconds % 3600) / 60)}m`;
     }, [tokenomics]);
 
     return (
@@ -297,30 +298,32 @@ export default function Tokenomics() {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border/30">
-                                {[
-                                    { era: "Genesis Event", height: 0, reward: 5_000_000, type: "PRE-MINE" },
-                                    { era: "Early Era (Phase 1)", height: 100_000, reward: 20, type: "POW-MINING" },
-                                    { era: "Growth Era (Phase 2)", height: 200_000, reward: 10, type: "POW-MINING" },
-                                    { era: "Mature Era (Phase 3)", height: 300_000, reward: 5, type: "POW-MINING" },
-                                    { era: "Scarce Era (Phase 4)", height: 400_000, reward: 2.5, type: "POW-MINING" },
-                                    { era: "Tail Emission", height: 500_000, reward: 1.25, type: "POW-MINING" },
-                                ].map((item, i) => {
-                                    const isActive = height >= item.height && (i === 5 || height < (item.height + 100000)); // Rough logic for highlighting
+                                {[0, 1, 2, 3, 4, 5].map((cycle) => {
+                                    const height = cycle * 63_072_000;
+                                    const reward = 0.126839 / Math.pow(2, cycle);
+
                                     return (
-                                        <tr key={i} className={cn(
+                                        <tr key={cycle} className={cn(
                                             "transition-colors group hover:bg-white/5",
-                                            isActive ? "bg-primary/5" : ""
+                                            // Simple active check: if we are in this era
+                                            (tokenomics?.current_reward && Math.abs((tokenomics.current_reward / AGT_DIVISOR) - reward) < 0.0001) ? "bg-primary/5" : ""
                                         )}>
                                             <td className="px-5 py-2.5 font-medium flex items-center gap-3">
-                                                <div className={cn("w-1.5 h-1.5 rounded-full", isActive ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground/30")} />
-                                                <span className={cn(isActive ? "text-foreground font-bold" : "text-muted-foreground")}>{item.era}</span>
+                                                <div className={cn("w-1.5 h-1.5 rounded-full", (tokenomics?.current_reward && Math.abs((tokenomics.current_reward / AGT_DIVISOR) - reward) < 0.0001) ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground/30")} />
+                                                <span className={cn((tokenomics?.current_reward && Math.abs((tokenomics.current_reward / AGT_DIVISOR) - reward) < 0.0001) ? "text-foreground font-bold" : "text-muted-foreground")}>
+                                                    {cycle === 0 ? "Genesis Era" : `Halving Cycle ${cycle}`}
+                                                </span>
                                             </td>
-                                            <td className="px-5 py-2.5 font-mono text-[10px] text-muted-foreground group-hover:text-foreground transition-colors">#{item.height.toLocaleString()}</td>
+                                            <td className="px-5 py-2.5 font-mono text-[10px] text-muted-foreground group-hover:text-foreground transition-colors">
+                                                #{height.toLocaleString()}
+                                            </td>
                                             <td className="px-5 py-2.5">
-                                                <Badge variant="outline" className="text-[8px] font-mono font-normal opacity-70 bg-background/50">{item.type}</Badge>
+                                                <Badge variant="outline" className="text-[8px] font-mono font-normal opacity-70 bg-background/50">
+                                                    {cycle === 0 ? "MINING START" : "STD-HALVING"}
+                                                </Badge>
                                             </td>
                                             <td className="px-5 py-2.5 text-right font-mono font-bold text-foreground">
-                                                {item.reward.toLocaleString()}
+                                                {reward.toFixed(6)}
                                             </td>
                                         </tr>
                                     );

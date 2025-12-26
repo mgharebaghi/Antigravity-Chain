@@ -67,7 +67,9 @@ struct AppState {
     chain_index: Arc<std::sync::atomic::AtomicU64>,
     mined_by_me_count: Arc<std::sync::atomic::AtomicU64>,
     peer_count: Arc<AtomicUsize>,
+    validator_count: Arc<AtomicUsize>,
     tx_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Transaction>>>>,
+    receipt_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::chain::Receipt>>>>,
     mining_enabled: Arc<AtomicBool>,
     node_type: Arc<Mutex<NodeType>>,
     vdf_ips: Arc<std::sync::atomic::AtomicU64>,
@@ -202,6 +204,10 @@ fn get_network_info(state: State<'_, AppState>) -> Vec<PeerInfo> {
 pub struct SelfNodeInfo {
     pub peer_id: String,
     pub addresses: Vec<String>,
+    pub shard_id: u16,
+    pub total_shards: u16,
+    pub shard_tps_limit: u64,
+    pub global_tps_capacity: u64,
 }
 
 #[tauri::command]
@@ -213,9 +219,21 @@ fn get_self_node_info(state: State<'_, AppState>) -> Option<SelfNodeInfo> {
             .get(id)
             .map(|n| n.addresses.clone())
             .unwrap_or_default();
+
+        // AHSP Info
+        let total_shards = consensus.calculate_active_shards();
+        let shard_id = consensus.get_assigned_shard(id, 0);
+        // TPS = Tx Per Block / Block Time
+        let shard_tps_limit = crate::chain::MAX_TXS_PER_BLOCK / crate::chain::TARGET_BLOCK_TIME;
+        let global_tps_capacity = total_shards as u64 * shard_tps_limit;
+
         SelfNodeInfo {
             peer_id: id.clone(),
             addresses,
+            shard_id,
+            total_shards,
+            shard_tps_limit,
+            global_tps_capacity,
         }
     })
 }
@@ -287,57 +305,77 @@ async fn start_node(
     // Increment run_id to invalidate previous loops
     let my_run_id = state.run_id.fetch_add(1, Ordering::Relaxed) + 1;
 
-    let storage = state.storage.clone();
-    let mempool = state.mempool.clone();
-    let is_synced = state.is_synced.clone();
-    let is_running = state.is_running.clone();
-    let run_id_arc = state.run_id.clone();
-    let peer_count = state.peer_count.clone();
     let node_type_arc = state.node_type.clone();
-    let node_type_p2p = node_type_arc.clone();
 
-    // Create channels for mining loop -> p2p and submit_tx -> p2p
+    // Create Channels
     let (block_sender, block_receiver) = tokio::sync::mpsc::channel::<Box<chain::Block>>(100);
-    let (tx_sender, tx_receiver) = tokio::sync::mpsc::channel::<chain::Transaction>(100);
+    let (tx_sender, tx_receiver) = tokio::sync::mpsc::channel::<chain::Transaction>(1000);
+    let (receipt_sender, receipt_receiver) = tokio::sync::mpsc::channel::<chain::Receipt>(1000);
 
-    // Store tx_sender in state for command access
     {
-        let mut sender_guard = state.tx_sender.lock().unwrap();
-        *sender_guard = Some(tx_sender);
+        let mut ts = state.tx_sender.lock().unwrap();
+        *ts = Some(tx_sender.clone());
+    }
+    {
+        let mut rs = state.receipt_sender.lock().unwrap();
+        *rs = Some(receipt_sender.clone());
     }
 
     // Spawn P2P
-    let app_handle_clone = app_handle.clone();
-    let consensus_p2p = state.consensus.clone(); // Clone for P2P
+    // Extract wallet keypair to ensure Node ID matches Wallet ID
+    let wallet_keypair = {
+        let w_guard = state.wallet.lock().unwrap();
+        if let Some(w) = w_guard.as_ref() {
+            libp2p::identity::Keypair::from_protobuf_encoding(&w.keypair).ok()
+        } else {
+            None
+        }
+    };
 
-    let chain_index = state.chain_index.clone();
     // Fetch settings
     let settings = match state.storage.get_setting("app_settings") {
         Ok(Some(json)) => serde_json::from_str::<AppSettings>(&json).unwrap_or_default(),
         _ => AppSettings::default(),
     };
     let relay_addr_str = settings.relay_address.clone();
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(100);
+    let validator_count_p2p = state.validator_count.clone();
+    let peer_count_p2p = state.peer_count.clone();
+    let is_synced_p2p = state.is_synced.clone();
+    let is_running_p2p = state.is_running.clone();
+    let consensus_p2p = state.consensus.clone();
+    let storage_p2p = state.storage.clone();
+    let mempool_p2p = state.mempool.clone();
+    let run_id_p2p = state.run_id.clone();
+    let chain_index_p2p = state.chain_index.clone();
+    let node_type_p2p = state.node_type.clone();
+    let app_handle_p2p = app_handle.clone();
 
-    tauri::async_runtime::spawn(async move {
+    // --- P2P START ---
+    tokio::spawn(async move {
         if let Err(e) = p2p::start_p2p_node(
-            app_handle_clone,
-            storage,
-            mempool,
+            app_handle_p2p,
+            storage_p2p,
+            mempool_p2p,
             consensus_p2p,
-            is_synced,
-            is_running,
-            run_id_arc,
-            peer_count,
-            chain_index,
-            relay_addr_str,
+            is_synced_p2p,
+            is_running_p2p,
+            run_id_p2p,
+            peer_count_p2p,
+            validator_count_p2p,
+            chain_index_p2p,
+            relay_addr_str.clone(),
             my_run_id,
             block_receiver,
             tx_receiver,
+            receipt_receiver,
             node_type_p2p,
+            wallet_keypair,
+            cmd_rx,
         )
         .await
         {
-            log::error!("P2P Node error: {}", e);
+            log::error!("P2P Node Error: {:?}", e);
         }
     });
 
@@ -364,6 +402,8 @@ async fn start_node(
     let mined_by_me_count_loop = state.mined_by_me_count.clone();
     let wallet_clone = state.wallet.clone(); // Clone ARC for loop
     let mining_enabled_arc = state.mining_enabled.clone();
+    let receipt_sender_loop = state.receipt_sender.clone();
+    let validator_count_loop = state.validator_count.clone();
 
     // Initialize metrics from storage
     let current_height = state.storage.get_latest_index().unwrap_or(0);
@@ -421,6 +461,7 @@ async fn start_node(
         println!("VDF Heartbeat: Terminating run_id {}", my_run_id);
     });
 
+    let cmd_tx_loop = cmd_tx.clone();
     tauri::async_runtime::spawn(async move {
         println!("Mining Loop: Thread started for run_id: {}", my_run_id);
         // Phase 1: Connect to Relay
@@ -444,16 +485,36 @@ async fn start_node(
         }
 
         if !relay_connected {
-            println!("Mining Loop: Relay connection failed/timed out. Continuing as standalone...");
-            let _ = app_handle_loop.emit("node-status", "Relay Timeout (Standalone)");
+            println!("Mining Loop: Relay connection failed. Keep trying for Real-World Network...");
+            let _ = app_handle_loop.emit("node-status", "Waiting for Relay...");
+            return; // Exit thread, let user/system retry or have a wrapper loop
         }
 
-        // Phase 2: Discovery (Wait for peers)
-        let _ = app_handle_loop.emit("node-status", "Discovering Peers...");
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        // Phase 2: Discovery via Relay & DHT
+        // Real-world: We must wait for the DHT to bootstrap via the relay to find other peers.
+        let mut discovery_ticks = 0;
+        let max_discovery_ticks = 15; // 15 seconds to find peers
+
+        while discovery_ticks < max_discovery_ticks {
+            let v_count = validator_count_loop.load(Ordering::Relaxed);
+            if v_count > 0 {
+                println!("Mining Loop: Discovery Success! Found {} peers.", v_count);
+                break;
+            }
+
+            let _ = app_handle_loop.emit(
+                "node-status",
+                format!(
+                    "Discovering Peers... ({}/{})",
+                    discovery_ticks, max_discovery_ticks
+                ),
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            discovery_ticks += 1;
+        }
 
         // Phase 3: Decision
-        let peers = peer_count_loop.load(Ordering::Relaxed);
+        let peers = validator_count_loop.load(Ordering::Relaxed);
         let local_height_opt = storage_clone.get_block(0).unwrap_or(None);
         let local_exists = local_height_opt.is_some();
 
@@ -463,41 +524,91 @@ async fn start_node(
         );
 
         if !local_exists {
-            // We move Genesis creation to the mining loop to ensure it gets assigned to the active miner
-            // when the chain is empty (especially after a reset).
-            println!("Mining Loop: First node! Creating Genesis...");
-            let _ = app_handle_loop.emit("node-status", "Creating Genesis...");
+            if peers > 0 {
+                println!(
+                    "Mining Loop: Peers detected ({}) but no local chain. Attempting to sync...",
+                    peers
+                );
 
-            let genesis_tx = Transaction {
-                id: "genesis".to_string(),
-                sender: "SYSTEM".to_string(),
-                receiver: wallet_addr.clone(),
-                amount: crate::chain::GENESIS_SUPPLY,
-                timestamp: 0,
-                signature: "genesis".to_string(),
-            };
-            let mut genesis_block = chain::Block::new(
-                0,
-                wallet_addr.clone(),
-                vec![genesis_tx],
-                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-                100,
-                200_000,
-                0,                            // Fees for genesis
-                crate::chain::GENESIS_SUPPLY, // Genesis supply as reward
-            );
+                // Active Sync: Request from peers
+                let _ = app_handle_loop.emit("node-status", "Requesting Sync...");
+                // Cloned cmd_tx not needed if single use here, but checking ownership rules
+                if let Err(e) = cmd_tx_loop
+                    .send(crate::p2p::P2PCommand::SyncWithNetwork)
+                    .await
+                {
+                    println!("Mining Loop: Failed to send Sync command: {}", e);
+                } else {
+                    println!("Mining Loop: Sync command sent.");
+                }
 
-            // VDF
-            let vdf = AntigravityVDF::new(genesis_block.vdf_difficulty);
-            let challenge = genesis_block.calculate_hash();
-            genesis_block.vdf_proof = vdf.solve(challenge.as_bytes());
-            genesis_block.hash = genesis_block.calculate_hash();
-            genesis_block.size = genesis_block.calculate_size();
+                // Wait for sync (Active response should arrive quickly)
+                for i in 0..60 {
+                    // Increased wait for active sync (fetching multiple blocks)
+                    let _ = app_handle_loop
+                        .emit("node-status", format!("Synchronizing... ({}/60)", i + 1));
+                    tokio::time::sleep(Duration::from_secs(1)).await;
 
-            let _ = storage_clone.save_block(&genesis_block);
-            chain_index_loop.store(0, Ordering::Relaxed);
-            mined_by_me_count_loop.fetch_add(1, Ordering::Relaxed);
-            let _ = app_handle_loop.emit("new-block", genesis_block);
+                    if storage_clone.get_block(0).unwrap_or(None).is_some() {
+                        println!("Mining Loop: Sync successful! Genesis found.");
+                        break;
+                    }
+                }
+            }
+
+            // Re-check after potential sync wait
+            let local_exists_now = storage_clone.get_block(0).unwrap_or(None).is_some();
+            if !local_exists_now {
+                // Critical Check: ONLY create genesis if we are certain we are the first/only node.
+                // In a real network, this means we are connected to the relay, but saw 0 other validators.
+                let current_peers = validator_count_loop.load(Ordering::Relaxed);
+
+                if current_peers > 0 {
+                    println!("Mining Loop: Peers detected ({}) but Sync failed/incomplete. Retrying Sync loop...", current_peers);
+                    let _ = app_handle_loop.emit("node-status", "Sync Retrying...");
+                    // Do NOT create Genesis. Loop back or return to retry.
+                    // For this implementation, we'll continue the loop which sleeps and retries logic if we structured it right.
+                    // But here we are outside the main loop. Let's return to force a full retry of the state.
+                    return;
+                }
+
+                println!("Mining Loop: Connected to Relay, but no other peers found. I am the First Node.");
+                println!("Mining Loop: Creating Genesis Block...");
+                let _ = app_handle_loop.emit("node-status", "Creating Genesis...");
+
+                let genesis_tx = Transaction {
+                    id: "genesis".to_string(),
+                    sender: "SYSTEM".to_string(),
+                    receiver: wallet_addr.clone(),
+                    amount: crate::chain::GENESIS_SUPPLY,
+                    shard_id: 0,
+                    timestamp: 0,
+                    signature: "genesis".to_string(),
+                };
+                let mut genesis_block = chain::Block::new(
+                    0,
+                    wallet_addr.clone(),
+                    vec![genesis_tx],
+                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+                    100,                          // weight
+                    100,                          // difficulty (solo)
+                    0,                            // shard_id
+                    0,                            // Fees for genesis
+                    crate::chain::GENESIS_SUPPLY, // Genesis supply as reward
+                );
+
+                // VDF
+                let vdf = AntigravityVDF::new(genesis_block.vdf_difficulty);
+                let challenge = genesis_block.calculate_hash();
+                genesis_block.vdf_proof = vdf.solve(challenge.as_bytes());
+                genesis_block.hash = genesis_block.calculate_hash();
+                genesis_block.size = genesis_block.calculate_size();
+
+                let _ = storage_clone.save_block(&genesis_block);
+                chain_index_loop.store(0, Ordering::Relaxed);
+                mined_by_me_count_loop.fetch_add(1, Ordering::Relaxed);
+                let _ = app_handle_loop.emit("new-block", genesis_block);
+            }
         }
 
         is_synced_loop.store(true, Ordering::Relaxed);
@@ -519,7 +630,7 @@ async fn start_node(
             if is_synced_loop.load(Ordering::Relaxed) {
                 let (is_leader, leader_id) = {
                     let consensus = consensus_clone.lock().unwrap();
-                    let leader = consensus.select_leader();
+                    let leader = consensus.select_beacon_leader();
                     let me = consensus.local_peer_id.clone();
                     println!(
                         "Mining Loop: Leader Election - Leader: {:?}, Me: {:?}",
@@ -533,7 +644,7 @@ async fn start_node(
 
                 let elapsed = last_production_time.elapsed().as_secs();
                 if mining_enabled && is_leader {
-                    if elapsed >= 10 || pending.len() >= 10 {
+                    if elapsed >= crate::chain::TARGET_BLOCK_TIME || pending.len() >= 100 {
                         let current_idx = chain_index_loop.load(Ordering::Relaxed);
                         let is_empty = storage_clone.get_total_blocks().unwrap_or(0) == 0;
                         let target_idx = if is_empty { 0 } else { current_idx + 1 };
@@ -571,6 +682,7 @@ async fn start_node(
                                 sender: "SYSTEM".to_string(),
                                 receiver: current_wallet_addr.clone(),
                                 amount: block_reward,
+                                shard_id: 0,
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
@@ -578,11 +690,15 @@ async fn start_node(
                                 signature: "genesis".to_string(),
                             }
                         } else {
+                            // Calculate shard_id for coinbase based on receiver?
+                            // For now, coinbase is valid on ALL shards (or specific system shard 0)
+                            // Let's assign it to Shard 0 for simplicity in this phase
                             chain::Transaction {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 sender: "SYSTEM".to_string(),
                                 receiver: current_wallet_addr.clone(),
                                 amount: block_reward + total_fees,
+                                shard_id: 0,
                                 timestamp: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
@@ -591,8 +707,71 @@ async fn start_node(
                             }
                         };
 
+                        // Phase 2: Shard Engine - Filter & Limit
+                        let my_shard_id = {
+                            let consensus = consensus_clone.lock().unwrap();
+                            if let Some(peer_id) = &consensus.local_peer_id {
+                                consensus.get_assigned_shard(peer_id, 0)
+                            } else {
+                                0
+                            }
+                        };
+
                         let mut block_txs = vec![coinbase_tx];
-                        block_txs.extend(pending.clone());
+                        let mut current_size = 300; // Approx size of coinbase
+
+                        // Select transactions for THIS shard only
+                        for tx in pending.iter() {
+                            // 1. Check Shard Routing
+                            if tx.shard_id != my_shard_id {
+                                continue;
+                            }
+
+                            // Phase 3: Cross-Shard Receipt Generation
+                            let target_shard = {
+                                let consensus = consensus_clone.lock().unwrap();
+                                consensus.get_assigned_shard(&tx.receiver, 0)
+                            };
+
+                            if target_shard != my_shard_id {
+                                let receipt = crate::chain::Receipt {
+                                    original_tx_id: tx.id.clone(),
+                                    source_shard: my_shard_id,
+                                    target_shard,
+                                    amount: tx.amount,
+                                    receiver: tx.receiver.clone(),
+                                    block_hash: "pending".to_string(),
+                                    merkle_proof: vec![],
+                                };
+
+                                // Send to P2P for broadcasting
+                                if let Some(sender) = receipt_sender_loop.lock().unwrap().as_ref() {
+                                    if let Err(e) = sender.try_send(receipt) {
+                                        log::warn!("Failed to send receipt: {}", e);
+                                    } else {
+                                        log::info!(
+                                            "Generated Receipt for Tx {} -> Shard {}",
+                                            tx.id,
+                                            target_shard
+                                        );
+                                    }
+                                }
+                            }
+
+                            // 2. Check TPS Limit (per block)
+                            if block_txs.len() >= crate::chain::MAX_TXS_PER_BLOCK as usize {
+                                break;
+                            }
+
+                            // 3. Check Block Size Limit
+                            // Approx 300 bytes per tx for now (serialization is heavier but this is a safety guard)
+                            if current_size + 300 > crate::chain::MAX_BLOCK_SIZE {
+                                break;
+                            }
+
+                            block_txs.push(tx.clone());
+                            current_size += 300;
+                        }
 
                         let prev_hash = if target_idx == 0 {
                             "0000000000000000000000000000000000000000000000000000000000000000"
@@ -608,19 +787,29 @@ async fn start_node(
                                 })
                         };
 
+                        let current_validators = validator_count_loop.load(Ordering::Relaxed);
+                        let adaptive_difficulty = if current_validators <= 1 {
+                            100 // Fast solo production
+                        } else {
+                            // Scale difficulty linearly with network size to manage collision
+                            100 + (current_validators as u64 * 100)
+                        };
+
                         let mut new_block = chain::Block::new(
                             target_idx,
                             current_wallet_addr.clone(),
                             block_txs,
                             prev_hash,
-                            100,
-                            200_000,
+                            100, // weight
+                            adaptive_difficulty,
+                            my_shard_id as u32,
                             total_fees,
                             block_reward,
                         );
 
                         let vdf = AntigravityVDF::new(new_block.vdf_difficulty);
                         let challenge = new_block.calculate_hash();
+                        let _ = app_handle_loop.emit("node-status", "Solving Proof of Patience...");
                         new_block.vdf_proof = vdf.solve(challenge.as_bytes());
                         new_block.hash = new_block.calculate_hash();
                         new_block.size = new_block.calculate_size();
@@ -828,6 +1017,12 @@ fn submit_transaction(
             ));
         }
 
+        // Calculate Shard ID for the user transaction
+        let shard_id = {
+            let consensus = state.consensus.lock().unwrap();
+            consensus.get_assigned_shard(&wallet.address, 0)
+        };
+
         // Create Transaction
         // In real app: Sign with Keypair
         let tx = Transaction {
@@ -835,6 +1030,7 @@ fn submit_transaction(
             sender: wallet.address.clone(),
             receiver,
             amount,
+            shard_id,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -915,19 +1111,11 @@ pub struct TokenomicsInfo {
 #[tauri::command]
 fn get_tokenomics_info(state: State<'_, AppState>) -> TokenomicsInfo {
     let height = state.chain_index.load(Ordering::Relaxed);
-    let next_halving = if height <= 500_000 {
-        ((height / crate::chain::HALVING_INTERVAL_EARLY) + 1) * crate::chain::HALVING_INTERVAL_EARLY
-    } else {
-        500_000
-            + (((height - 500_000) / crate::chain::HALVING_INTERVAL_STABLE) + 1)
-                * crate::chain::HALVING_INTERVAL_STABLE
-    };
+    // Standard Halving Logic
+    let current_interval = height / crate::chain::HALVING_INTERVAL;
+    let next_halving = (current_interval + 1) * crate::chain::HALVING_INTERVAL;
 
-    let halving_interval = if height < 500_000 {
-        crate::chain::HALVING_INTERVAL_EARLY
-    } else {
-        crate::chain::HALVING_INTERVAL_STABLE
-    };
+    let halving_interval = crate::chain::HALVING_INTERVAL;
 
     let circulating = crate::chain::calculate_circulating_supply(height);
 
@@ -941,6 +1129,38 @@ fn get_tokenomics_info(state: State<'_, AppState>) -> TokenomicsInfo {
         current_reward: crate::chain::calculate_mining_reward(height),
         halving_interval,
     }
+}
+
+#[tauri::command]
+fn get_consensus_status(state: State<'_, AppState>) -> crate::consensus::NodeConsensusStatus {
+    let wallet_guard = state.wallet.lock().unwrap();
+    let consensus_guard = state.consensus.lock().unwrap();
+
+    let peer_id = match wallet_guard.as_ref() {
+        Some(w) => match libp2p::identity::Keypair::from_protobuf_encoding(&w.keypair) {
+            Ok(kp) => kp.public().to_peer_id().to_string(),
+            Err(_) => {
+                return crate::consensus::NodeConsensusStatus {
+                    state: "Error".to_string(),
+                    queue_position: 0,
+                    estimated_blocks: 0,
+                    patience_progress: 0.0,
+                    remaining_seconds: 0,
+                }
+            }
+        },
+        None => {
+            return crate::consensus::NodeConsensusStatus {
+                state: "Wallet Locked".to_string(),
+                queue_position: 0,
+                estimated_blocks: 0,
+                patience_progress: 0.0,
+                remaining_seconds: 0,
+            }
+        }
+    };
+
+    consensus_guard.get_node_status(&peer_id)
 }
 
 #[tauri::command]
@@ -1046,7 +1266,9 @@ pub fn run() {
             chain_index: Arc::new(std::sync::atomic::AtomicU64::new(initial_height)),
             mined_by_me_count: Arc::new(std::sync::atomic::AtomicU64::new(initial_mined_count)),
             peer_count: Arc::new(AtomicUsize::new(0)),
+            validator_count: Arc::new(AtomicUsize::new(0)),
             tx_sender: Arc::new(Mutex::new(None)),
+            receipt_sender: Arc::new(Mutex::new(None)),
             mining_enabled: Arc::new(AtomicBool::new(initial_mining)),
             node_type: Arc::new(Mutex::new(initial_node_type)),
             vdf_ips: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1076,7 +1298,8 @@ pub fn run() {
             save_app_settings,
             reset_chain_data,
             logout_wallet,
-            get_tokenomics_info
+            get_tokenomics_info,
+            get_consensus_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
