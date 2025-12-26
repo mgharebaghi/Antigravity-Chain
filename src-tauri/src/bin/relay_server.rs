@@ -51,14 +51,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut kad_config = kad::Config::default();
             kad_config
                 .set_protocol_names(vec![libp2p::StreamProtocol::new("/antigravity/kad/1.0.0")]);
-            // Server mode is default for Kademlia, but let's be explicit if needed by adding addresses
+
             let store = kad::store::MemoryStore::new(key.public().to_peer_id());
-            let kad_behaviour =
+            let mut kad_behaviour =
                 kad::Behaviour::with_config(key.public().to_peer_id(), store, kad_config);
 
-            // C. Identify
+            // Force Server Mode so this node actively handles DHT queries and stores records
+            kad_behaviour.set_mode(Some(kad::Mode::Server));
+
+            // C. Identify - Must match exactly with RPC/GUI nodes (/antigravity/1.0.0)
             let identify = libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                "/antigravity/relay/1.0.0".to_string(),
+                "/antigravity/1.0.0".to_string(),
                 key.public(),
             ));
 
@@ -105,6 +108,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 relay::Event::ReservationReqAccepted { src_peer_id, .. },
             )) => {
                 log::info!("Relay Reservation Accepted for: {}", src_peer_id);
+            }
+            SwarmEvent::Behaviour(RelayServerBehaviourEvent::Identify(
+                libp2p::identify::Event::Received { peer_id, info, .. },
+            )) => {
+                log::info!("Identify: Received info from {}, adding to DHT", peer_id);
+                for addr in info.listen_addrs {
+                    swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                }
             }
             SwarmEvent::Behaviour(RelayServerBehaviourEvent::Kad(kad::Event::RoutingUpdated {
                 peer,

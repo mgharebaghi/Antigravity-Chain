@@ -32,6 +32,8 @@ pub struct AntigravityBehaviour {
     >,
 }
 
+const SYNC_PROTOCOL: &str = "/antigravity/sync/1.0.0";
+
 use tauri::{AppHandle, Emitter};
 
 use crate::chain::{Block, SyncRequest, SyncResponse, Transaction};
@@ -129,7 +131,7 @@ pub async fn start_p2p_node(
             // Request-Response (Sync)
             let sync = libp2p::request_response::cbor::Behaviour::new(
                 [(
-                    libp2p::StreamProtocol::new("/antigravity/sync/1"),
+                    libp2p::StreamProtocol::new(SYNC_PROTOCOL),
                     libp2p::request_response::ProtocolSupport::Full,
                 )],
                 libp2p::request_response::Config::default(),
@@ -209,6 +211,14 @@ pub async fn start_p2p_node(
                 log::error!("Failed to listen on relay circuit: {}", e);
             } else {
                 log::info!("Listening on relay circuit for incoming P2P connections.");
+                // CRITICAL: Announce our relayed address as an EXTERNAL address
+                // so the Relay can tell others how to reach us.
+                let external_addr = relay_addr_parsed
+                    .clone()
+                    .with(Protocol::P2pCircuit)
+                    .with(Protocol::P2p(local_peer_id));
+                log::info!("Announcing external address: {}", external_addr);
+                swarm.add_external_address(external_addr);
             }
 
             // Add relay to Kademlia as a bootstrap point
@@ -257,20 +267,18 @@ pub async fn start_p2p_node(
                          let targets = connected_peers.clone();
 
                          // Also try to reach out to peers in the DHT that we might not be fully connected to yet
-                         // This is crucial for initial discovery if gossip hasn't established mesh yet
                          if let Some(relay_id) = relay_peer_id_opt {
-                             let _scan_query = swarm.behaviour_mut().kad.get_closest_peers(relay_id);
-                             // We can't easily wait for query results here in this matching block,
-                             // but we can ensure we are querying.
-                             // For now, rely on `connected_peers` which should be populated by the relay connection logic + bootstrapper.
+                             let _ = swarm.behaviour_mut().kad.get_closest_peers(relay_id);
                          }
 
                          if targets.is_empty() {
-                             log::warn!("P2P Sync: No peers connected.");
+                             // Fallback: If no connected peers, try to start random sync with DHT peers (if any cached)
+                             // This is a "Hail Mary" passed to the Kademlia event handler
+                             log::warn!("P2P Sync: No direct peers. Querying DHT...");
                          } else {
                              for peer in targets {
                                  if Some(peer) == relay_peer_id_opt { continue; }
-                                 log::info!("P2P Sync: Requesting Height from {:?}", peer);
+                                 log::info!("P2P Sync: Sending GetHeight request to peer {}", peer);
                                  swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
                              }
                          }
@@ -278,32 +286,44 @@ pub async fn start_p2p_node(
                  }
             }
 
-            // Periodic Sync Check for New Nodes
-            _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                 // If we are NOT synced, keep asking
+            // Periodic Sync/Discovery Check
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                 // Emit DHT info for UI
+                 let mut dht_peers = Vec::new();
+                 // Correctly iterate Kademlia buckets
+                 for bucket in swarm.behaviour_mut().kad.kbuckets() {
+                     for entry in bucket.iter() {
+                         dht_peers.push(entry.node.key.preimage().to_string());
+                     }
+                 }
+                 let _ = app_handle.emit("dht-peers-update", dht_peers);
+
                  if !is_synced.load(Ordering::Relaxed) {
+                     // 1. Re-query DHT to find new peers
+                     if let Some(relay_id) = relay_peer_id_opt {
+                         let _ = swarm.behaviour_mut().kad.get_closest_peers(relay_id);
+                     }
+                     // 2. Ask existing peers for height
                      let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
                      for peer in peers {
                          if Some(peer) == relay_peer_id_opt { continue; }
+                         log::info!("P2P Loop: Timed Sync Request to {}", peer);
+                         let _ = app_handle.emit("sync-status", format!("Requesting height from {}", peer));
                          swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
                      }
                  }
             }
 
             _ = check_interval.tick() => {
-                 let count = swarm.network_info().num_peers();
-                 peer_count.store(count, Ordering::Relaxed);
-                 let _ = app_handle.emit("peer-count", count);
+                 let total_peers = swarm.network_info().num_peers();
+                 let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
+                 let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
 
-                 let connected_peers = swarm.connected_peers().collect::<Vec<_>>();
-                 let mut v_count = 0;
-                 for pid in connected_peers {
-                     if Some(*pid) != relay_peer_id_opt {
-                         v_count += 1;
-                     }
-                 }
-                 validator_count.store(v_count, Ordering::Relaxed);
-                 let _ = app_handle.emit("validator-count", v_count);
+                 peer_count.store(valid_peers, Ordering::Relaxed);
+                 let _ = app_handle.emit("peer-count", valid_peers);
+
+                 validator_count.store(valid_peers, Ordering::Relaxed);
+                 let _ = app_handle.emit("validator-count", valid_peers);
             }
 
             Some(block) = block_receiver.recv() => {
@@ -340,7 +360,29 @@ pub async fn start_p2p_node(
                     info,
                     ..
                 })) => {
-                    log::info!("Identified peer {:?} with addresses {:?}", peer_id, info.listen_addrs);
+                    log::info!("Identified peer {:?} with version {:?}", peer_id, info.protocol_version);
+
+                    // CRITICAL: Populate Kademlia DHT with the addresses we just learned.
+                    for addr in &info.listen_addrs {
+                        swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    }
+
+                    // If this is the RELAY, trigger a bootstrap now that we have its identified address
+                    if let Some(rid) = relay_peer_id_opt {
+                        if rid == peer_id {
+                             log::info!("P2P: Relay identified. Bootstrapping DHT...");
+                             if let Err(e) = swarm.behaviour_mut().kad.bootstrap() {
+                                 log::error!("Kademlia bootstrap error: {:?}", e);
+                             }
+                        }
+                    }
+
+                    // PROACTIVE: If we aren't synced, ask this peer for their height immediately.
+                    if !is_synced.load(Ordering::Relaxed) && Some(peer_id) != relay_peer_id_opt {
+                         log::info!("P2P Sync: Identified NEW validator {}. Requesting height...", peer_id);
+                         swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
+                    }
+
                     let mut c = consensus.lock().unwrap();
                     let pid_str = peer_id.to_string();
                     let node = c.nodes.entry(pid_str.clone()).or_insert_with(|| crate::consensus::NodeState::new(pid_str));
@@ -392,6 +434,7 @@ pub async fn start_p2p_node(
                         match request {
                             SyncRequest::GetHeight => {
                                 let height = storage.get_latest_index().unwrap_or(0);
+                                log::info!("P2P Sync: Responding to GetHeight from {} with {}", peer, height);
                                 let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Height(height));
                             }
                             SyncRequest::GetBlock(index) => {
@@ -427,7 +470,15 @@ pub async fn start_p2p_node(
 
                                 if remote_height >= start {
                                     let end = (start + 100).min(remote_height);
-                                    let _ = app_handle.emit("node-status", format!("Batch Syncing {}..{}", start, end));
+                                    let msg = format!("Batch Syncing {}..{}", start, end);
+                                    log::info!("P2P Sync: {}", msg);
+                                    let _ = app_handle.emit("node-status", msg);
+                                    let _ = app_handle.emit("sync-status", serde_json::json!({
+                                        "state": "syncing",
+                                        "current": start,
+                                        "target": end,
+                                        "peer": peer.to_string()
+                                    }).to_string());
                                     swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetBlocksRange(start, end));
                                 } else {
                                     // If we are at the same height or ahead, AND we have at least one block, we are synced.
@@ -505,7 +556,11 @@ pub async fn start_p2p_node(
                     } else {
                         consensus.lock().unwrap().register_node(peer_id.to_string());
                     }
-                    peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
+                    // Update peer count (excluding relay)
+                    let total_peers = swarm.network_info().num_peers();
+                    let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
+                    let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
+                    peer_count.store(valid_peers, Ordering::Relaxed);
                 }
 
                 SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
@@ -514,7 +569,11 @@ pub async fn start_p2p_node(
                         log::warn!("Relay connection closed: {}", peer_id);
                         let _ = app_handle.emit("relay-status", "disconnected");
                     }
-                    peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
+                    // Update peer count (excluding relay)
+                    let total_peers = swarm.network_info().num_peers();
+                    let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
+                    let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
+                    peer_count.store(valid_peers, Ordering::Relaxed);
                 }
 
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { .. })) => {
@@ -526,12 +585,25 @@ pub async fn start_p2p_node(
                     let _ = app_handle.emit("relay-status", "reservation-failed");
                 }
                 SwarmEvent::Behaviour(AntigravityBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
-                     log::info!("Kademlia: Routing updated for peer {}", peer);
-                     // If we just found a peer via DHT, try to sync with them immediately if we are not synced
-                     if !is_synced.load(Ordering::Relaxed) && Some(peer) != relay_peer_id_opt {
-                         swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                     log::info!("Kademlia: Found peer {} via DHT", peer);
+                     // CRITICAL: DHT found a peer, but we might not be connected to them.
+                     // We MUST dial them to establish a GossipSub/RequestResponse link.
+                     if Some(peer) != relay_peer_id_opt {
+                         if !swarm.is_connected(&peer) {
+                             log::info!("P2P: Dialing discovered peer {}", peer);
+                             let _ = swarm.dial(peer);
+                         } else {
+                             // Already connected, maybe try to sync?
+                             if !is_synced.load(Ordering::Relaxed) {
+                                  swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
+                             }
+                         }
                      }
-                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
+                     // Update peer count (excluding relay)
+                     let total_peers = swarm.network_info().num_peers();
+                     let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
+                     let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
+                     peer_count.store(valid_peers, Ordering::Relaxed);
                 }
                 _ => {}
             }

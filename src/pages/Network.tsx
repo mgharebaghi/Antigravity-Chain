@@ -1,10 +1,11 @@
 import { Badge } from "../components/ui/badge";
-import { ShieldCheck, ShieldAlert, Activity, Globe, Server, Network as NetworkIcon, Link, Wifi, Copy, Check, Cpu } from "lucide-react";
+import { ShieldCheck, ShieldAlert, Activity, Globe, Server, Network as NetworkIcon, Link, Wifi, Copy, Check, Cpu, Cloud } from "lucide-react";
 import { useEffect, useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
 import { useApp } from "../context/AppContext";
 import { useToast } from "../context/ToastContext";
+import { listen } from "@tauri-apps/api/event";
 
 interface PeerInfo {
     peer_id: string;
@@ -27,8 +28,10 @@ const getPeerColor = (peerId: string) => {
 
 export default function Network() {
     const [peers, setPeers] = useState<PeerInfo[]>([]);
+    const [dhtPeers, setDhtPeers] = useState<string[]>([]);
     const [selfInfo, setSelfInfo] = useState<SelfNodeInfo | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [syncInfo, setSyncInfo] = useState<{ state: string, current: number, target: number, peer: string } | null>(null);
     const { height, relayStatus, connectedRelay } = useApp();
     const { success } = useToast();
 
@@ -48,7 +51,24 @@ export default function Network() {
 
         fetchData();
         const interval = setInterval(fetchData, 5000);
-        return () => clearInterval(interval);
+
+        // Listen for DHT updates
+        const unlistenPromise = listen<string[]>("dht-peers-update", (event) => {
+            setDhtPeers(event.payload);
+        });
+
+        const unlistenSyncPromise = listen<string>("sync-status", (event) => {
+            try {
+                const data = JSON.parse(event.payload);
+                setSyncInfo(data);
+            } catch (e) { console.error("Sync status parse error", e); }
+        });
+
+        return () => {
+            clearInterval(interval);
+            unlistenPromise.then(unlisten => unlisten());
+            unlistenSyncPromise.then(unlisten => unlisten());
+        };
     }, []);
 
     const validatorPeers = useMemo(() => {
@@ -69,7 +89,7 @@ export default function Network() {
     };
 
     return (
-        <div className="flex flex-col gap-6 h-full">
+        <div className="flex flex-col gap-6 h-full pb-10">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Network Status</h1>
@@ -154,8 +174,18 @@ export default function Network() {
                                 </div>
                             </div>
                             <div className="text-right">
-                                <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Ledger Height</p>
-                                <p className="text-2xl font-mono font-black text-foreground">#{height.toLocaleString()}</p>
+                                {syncInfo && syncInfo.state === 'syncing' ? (
+                                    <div className="flex flex-col items-end gap-1">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-500 animate-pulse">Synchronizing Data</p>
+                                        <p className="text-sm font-mono font-bold text-emerald-500/80">{syncInfo.current} / {syncInfo.target} Blocks</p>
+                                        <p className="text-[8px] text-muted-foreground opacity-60">from {syncInfo.peer.substring(0, 8)}...</p>
+                                    </div>
+                                ) : (
+                                    <>
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-1">Ledger Height</p>
+                                        <p className="text-2xl font-mono font-black text-foreground">#{height.toLocaleString()}</p>
+                                    </>
+                                )}
                             </div>
                         </div>
 
@@ -198,83 +228,82 @@ export default function Network() {
                 </div>
             </div>
 
-            {/* Peers List */}
-            <div className="flex-1 glass-card rounded-3xl border-none flex flex-col min-h-[400px] overflow-hidden shadow-none bg-background/30">
-                <div className="p-6 border-b border-border/50 flex items-center justify-between bg-secondary/20">
-                    <h3 className="font-bold text-lg flex items-center gap-2">
-                        <NetworkIcon className="w-5 h-5 text-primary" /> Active Peers
-                        <Badge variant="secondary" className="ml-2 font-mono text-xs">{validatorPeers.length}</Badge>
-                    </h3>
+            {/* Combined Peers & DHT View */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-[400px]">
+
+                {/* Active Connected Peers */}
+                <div className="glass-card rounded-3xl border-none flex flex-col overflow-hidden shadow-none bg-background/30">
+                    <div className="p-6 border-b border-border/50 flex items-center justify-between bg-secondary/20">
+                        <h3 className="font-bold text-lg flex items-center gap-2">
+                            <NetworkIcon className="w-5 h-5 text-primary" /> Connected Peers
+                            <Badge variant="secondary" className="ml-2 font-mono text-xs">{validatorPeers.length}</Badge>
+                        </h3>
+                    </div>
+
+                    <div className="flex-1 overflow-auto">
+                        {validatorPeers.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center p-12 text-muted-foreground gap-4">
+                                <div className="w-16 h-16 bg-secondary/50 rounded-full flex items-center justify-center opacity-50">
+                                    <Activity className="w-8 h-8 animate-pulse" />
+                                </div>
+                                <p className="text-sm opacity-70">No direct connections established.</p>
+                            </div>
+                        ) : (
+                            <div className="divide-y divide-border/30">
+                                {validatorPeers.map((peer) => (
+                                    <div key={peer.peer_id} className="p-4 hover:bg-primary/5 transition-colors flex items-center gap-4">
+                                        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shadow-lg ring-2 ring-white/10 shrink-0"
+                                            style={{ backgroundColor: getPeerColor(peer.peer_id) }}>
+                                            {peer.peer_id.substring(peer.peer_id.length - 2).toUpperCase()}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="font-mono font-bold text-sm truncate">{peer.peer_id}</p>
+                                            <p className="text-[10px] text-muted-foreground truncate">{peer.addresses[0] || 'Unknown address'}</p>
+                                        </div>
+                                        <Badge variant="outline" className="text-emerald-500 border-emerald-500/20 bg-emerald-500/5">Active</Badge>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 </div>
 
-                <div className="flex-1 overflow-x-auto overflow-y-auto">
-                    {validatorPeers.length === 0 ? (
-                        <div className="h-full flex flex-col items-center justify-center p-12 text-muted-foreground gap-4">
-                            <div className="w-16 h-16 bg-secondary/50 rounded-full flex items-center justify-center opacity-50 relative">
-                                <div className="absolute inset-0 rounded-full border border-primary/20 animate-ping" />
-                                <Activity className="w-8 h-8 animate-pulse text-primary" />
+                {/* Discovered / DHT Peers */}
+                <div className="glass-card rounded-3xl border-none flex flex-col overflow-hidden shadow-none bg-background/30">
+                    <div className="p-6 border-b border-border/50 flex items-center justify-between bg-secondary/20">
+                        <h3 className="font-bold text-lg flex items-center gap-2">
+                            <Cloud className="w-5 h-5 text-blue-400" /> Discovered (DHT)
+                            <Badge variant="secondary" className="ml-2 font-mono text-xs">{dhtPeers.length}</Badge>
+                        </h3>
+                    </div>
+
+                    <div className="flex-1 overflow-auto">
+                        {dhtPeers.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center p-12 text-muted-foreground gap-4">
+                                <div className="w-16 h-16 bg-secondary/50 rounded-full flex items-center justify-center opacity-50">
+                                    <Wifi className="w-8 h-8 opacity-50" />
+                                </div>
+                                <p className="text-sm opacity-70">Scanning network topology...</p>
                             </div>
-                            <div className="text-center">
-                                <h4 className="font-bold text-foreground">Discovery Mode Active</h4>
-                                <p className="text-sm mt-1 max-w-xs mx-auto opacity-70">Scanning distributed hash table for verified peers...</p>
-                            </div>
-                        </div>
-                    ) : (
-                        <table className="w-full text-sm text-left border-collapse min-w-[600px]">
-                            <thead className="text-[10px] uppercase font-bold text-muted-foreground bg-secondary/30 tracking-wider">
-                                <tr>
-                                    <th className="px-6 py-4 w-20">Badge</th>
-                                    <th className="px-6 py-4">Node Identity</th>
-                                    <th className="px-6 py-4">Verification</th>
-                                    <th className="px-6 py-4 text-right">Trust Score</th>
-                                    <th className="px-6 py-4 text-right">Round Trip</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-border/30">
-                                {validatorPeers.map((peer) => (
-                                    <tr key={peer.peer_id} className="hover:bg-primary/5 transition-colors group">
-                                        <td className="px-6 py-4">
-                                            <div
-                                                className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shadow-lg ring-2 ring-white/10"
-                                                style={{ backgroundColor: getPeerColor(peer.peer_id) }}
-                                            >
-                                                {peer.peer_id.substring(peer.peer_id.length - 2).toUpperCase()}
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <div className="flex flex-col gap-0.5">
-                                                <span className="font-mono font-bold text-sm text-foreground/80 group-hover:text-primary transition-colors truncate max-w-[180px] xl:max-w-xs">{peer.peer_id}</span>
-                                                <span className="text-[10px] text-muted-foreground">{peer.addresses.length} active routes</span>
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            {peer.is_verified ? (
-                                                <div className="flex items-center gap-1.5 text-emerald-500 font-bold text-xs bg-emerald-500/10 w-fit px-2 py-1 rounded-md">
-                                                    <ShieldCheck className="w-3.5 h-3.5" /> Verified
-                                                </div>
-                                            ) : (
-                                                <div className="flex items-center gap-1.5 text-amber-500 font-bold text-xs bg-amber-500/10 w-fit px-2 py-1 rounded-md">
-                                                    <ShieldAlert className="w-3.5 h-3.5" /> Unknown
-                                                </div>
-                                            )}
-                                        </td>
-                                        <td className="px-6 py-4 text-right">
-                                            <div className="flex items-center justify-end gap-2">
-                                                <div className="w-16 h-1.5 bg-secondary rounded-full overflow-hidden">
-                                                    <div className={cn("h-full rounded-full", peer.trust_score > 0.8 ? "bg-emerald-500" : "bg-amber-500")} style={{ width: `${peer.trust_score * 100}%` }} />
-                                                </div>
-                                                <span className="font-mono font-bold text-xs">{(peer.trust_score * 100).toFixed(0)}%</span>
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4 text-right">
-                                            <span className="font-mono font-medium text-xs text-muted-foreground">{peer.latency} ms</span>
-                                        </td>
-                                    </tr>
+                        ) : (
+                            <div className="divide-y divide-border/30">
+                                {dhtPeers.map((id) => (
+                                    <div key={id} className="p-4 hover:bg-primary/5 transition-colors flex items-center gap-4 opacity-75 hover:opacity-100">
+                                        <div className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-black text-white shadow-lg ring-2 ring-white/10 shrink-0 bg-gray-500">
+                                            ?
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="font-mono font-bold text-sm truncate">{id}</p>
+                                            <p className="text-[10px] text-muted-foreground">Discovered via Relay</p>
+                                        </div>
+                                        <Badge variant="secondary" className="opacity-50">Pending</Badge>
+                                    </div>
                                 ))}
-                            </tbody>
-                        </table>
-                    )}
+                            </div>
+                        )}
+                    </div>
                 </div>
+
             </div>
         </div>
     );

@@ -542,17 +542,32 @@ async fn start_node(
                     println!("Mining Loop: Sync command sent.");
                 }
 
-                // Wait for sync (Active response should arrive quickly)
-                for i in 0..60 {
-                    // Increased wait for active sync (fetching multiple blocks)
-                    let _ = app_handle_loop
-                        .emit("node-status", format!("Synchronizing... ({}/60)", i + 1));
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                // Wait for sync with dynamic checking
+                let max_sync_wait = 300; // 5 minutes
+                for i in 0..max_sync_wait {
+                    let h = storage_clone.get_latest_index().unwrap_or(0);
+                    let peers = peer_count_loop.load(Ordering::Relaxed);
 
+                    // If we have a chain (Height > 0 OR Block 0 exists), we are good.
                     if storage_clone.get_block(0).unwrap_or(None).is_some() {
-                        println!("Mining Loop: Sync successful! Genesis found.");
+                        println!(
+                            "Mining Loop: Sync successful! Genesis/Chain found (Height {}).",
+                            h
+                        );
                         break;
                     }
+
+                    // Feedback to UI
+                    if i % 3 == 0 {
+                        let _ = app_handle_loop.emit(
+                            "node-status",
+                            format!("Synchronizing... ({} peers, {}s)", peers, i),
+                        );
+                        // Keep asking for sync trigger every few seconds just in case
+                        let _ = cmd_tx_loop.try_send(crate::p2p::P2PCommand::SyncWithNetwork);
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
 

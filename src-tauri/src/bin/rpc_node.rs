@@ -10,7 +10,9 @@ use axum::{
 };
 use libp2p::{
     futures::StreamExt,
-    gossipsub, identity, kad, mdns, noise,
+    gossipsub, identity, kad, mdns,
+    multiaddr::Protocol,
+    noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
@@ -127,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
                 sync: libp2p::request_response::cbor::Behaviour::new(
                     [(
-                        libp2p::StreamProtocol::new("/antigravity/sync/1"),
+                        libp2p::StreamProtocol::new("/antigravity/sync/1.0.0"),
                         libp2p::request_response::ProtocolSupport::Full,
                     )],
                     libp2p::request_response::Config::default(),
@@ -137,9 +139,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
-    // Subscribe topics
-    let topic_blocks = gossipsub::IdentTopic::new("antigravity-blocks");
-    let topic_transactions = gossipsub::IdentTopic::new("antigravity-transactions");
+    // Subscribe topics (Standardized Shard 0 for RPC)
+    let topic_blocks = gossipsub::IdentTopic::new("antigravity-shard-0-blocks");
+    let topic_transactions = gossipsub::IdentTopic::new("antigravity-shard-0-txs");
     swarm.behaviour_mut().gossipsub.subscribe(&topic_blocks)?;
     swarm
         .behaviour_mut()
@@ -151,11 +153,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect to local relay if valid (assuming default)
     let relay_addr_str = "/ip4/127.0.0.1/tcp/9090";
-    if let Ok(addr) = relay_addr_str.parse::<Multiaddr>() {
+    if let Ok(addr) = relay_addr_str.parse::<libp2p::Multiaddr>() {
         log::info!("RPC Node dialing Relay at {}", addr);
         if let Err(e) = swarm.dial(addr.clone()) {
             log::error!("Failed to dial relay: {}", e);
         } else {
+            // Reservation: This allows other nodes to reach us via the relay
+            if let Err(e) = swarm.listen_on(addr.clone().with(Protocol::P2pCircuit)) {
+                log::error!("Failed to listen on relay circuit: {}", e);
+            } else {
+                log::info!("Listening on relay circuit for incoming P2P connections.");
+                let external_addr = addr
+                    .clone()
+                    .with(Protocol::P2pCircuit)
+                    .with(Protocol::P2p(local_peer_id));
+                log::info!("Announcing external address: {}", external_addr);
+                swarm.add_external_address(external_addr);
+            }
+
             // Add relay as DHT bootstrap node
             if let Some(relay_peer_id) = addr.iter().find_map(|p| match p {
                 libp2p::multiaddr::Protocol::P2p(id) => Some(id),
@@ -163,10 +178,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }) {
                 log::info!("Adding Relay {} to DHT buckets", relay_peer_id);
                 swarm.behaviour_mut().kad.add_address(&relay_peer_id, addr);
-                swarm.behaviour_mut().kad.bootstrap()?;
             }
         }
     }
+
+    let relay_peer_id_opt = relay_addr_str.parse::<Multiaddr>().ok().and_then(|addr| {
+        addr.iter().find_map(|p| match p {
+            libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+            _ => None,
+        })
+    });
 
     // Shared refs for P2P loop
     let p2p_storage = storage.clone();
@@ -221,12 +242,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    SwarmEvent::Behaviour(HeaderlessBehaviourEvent::Identify(libp2p::identify::Event::Received {
+                        peer_id,
+                        info,
+                        ..
+                    })) => {
+                        log::info!("Identified peer {:?} with version {:?}", peer_id, info.protocol_version);
+                        for addr in &info.listen_addrs {
+                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                        }
+
+                        if let Some(rid) = relay_peer_id_opt {
+                            if rid == peer_id {
+                                 log::info!("P2P: Relay identified. Bootstrapping DHT...");
+                                 let _ = swarm.behaviour_mut().kad.bootstrap();
+                            }
+                        }
+                    }
                     SwarmEvent::Behaviour(HeaderlessBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                          for (peer_id, _) in list {
                              swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                              let _ = swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
                          }
-                         p2p_peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                     }
                     SwarmEvent::Behaviour(HeaderlessBehaviourEvent::Sync(
                          libp2p::request_response::Event::Message { peer: _, message }
