@@ -19,7 +19,7 @@ struct RelayServerBehaviour {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     flexi_logger::Logger::try_with_str("info")?.start()?;
-    log::info!("Starting Antigravity Relay Server (Bootstrap Node)...");
+    log::info!("Starting Centichain Relay Server (Bootstrap Node)...");
 
     // 1. Generate keys (In production, load these from file!)
     let local_key = identity::Keypair::generate_ed25519();
@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // B. Kademlia (Server Mode) - Crucial for storing peer records
             let mut kad_config = kad::Config::default();
             kad_config
-                .set_protocol_names(vec![libp2p::StreamProtocol::new("/antigravity/kad/1.0.0")]);
+                .set_protocol_names(vec![libp2p::StreamProtocol::new("/centichain/kad/1.0.0")]);
 
             let store = kad::store::MemoryStore::new(key.public().to_peer_id());
             let mut kad_behaviour =
@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // C. Identify - Must match exactly with RPC/GUI nodes (/antigravity/1.0.0)
             let identify = libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                "/antigravity/1.0.0".to_string(),
+                "/centichain/1.0.0".to_string(),
                 key.public(),
             ));
 

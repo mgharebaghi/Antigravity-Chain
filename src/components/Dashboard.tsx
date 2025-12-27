@@ -1,14 +1,14 @@
 import { Activity, Zap, Layers, Pickaxe, RefreshCw, Shield, Gauge, Globe, Cpu, Server, Hash, Network, Clock } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Button } from './ui/button';
-import { cn, formatPatience } from '../lib/utils';
+import { cn } from '../lib/utils';
 import { Link } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { formatNumber } from '../utils/format';
 // import { useTheme } from '../context/ThemeContext';
 
 export default function Dashboard() {
-    const { wallet, nodeStatus, patience, peers, startNode, stopNode, latestBlock, minedBlocks, vdfStatus, selfNodeInfo, consensusStatus } = useApp();
+    const { wallet, nodeStatus, peers, startNode, stopNode, latestBlock, minedBlocks, vdfStatus, selfNodeInfo, consensusStatus } = useApp();
     // Theme unused
     // const { theme } = useTheme();
 
@@ -177,34 +177,58 @@ export default function Dashboard() {
 
             {/* Large Visualizer Area - Occupies remaining 40-50% of screen */}
             <div className="lg:flex-[1.2] lg:min-h-0 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Patience Accumulator - 2/3 width */}
+                {/* VDF Performance Visualizer - 2/3 width */}
                 <div className="lg:col-span-2 glass-card rounded-2xl p-6 flex flex-col justify-center items-center relative overflow-hidden h-full group shadow-xl shadow-primary/5">
                     <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent opacity-50 group-hover:opacity-100 transition-opacity" />
                     <div className="absolute top-4 left-6 flex items-center gap-2 text-xs font-bold text-muted-foreground uppercase tracking-widest">
-                        <Activity className="w-4 h-4 text-primary" /> Patience Accumulator
+                        <Gauge className="w-4 h-4 text-primary" /> VDF Performance
                     </div>
 
-                    <div className="relative z-10 flex flex-col items-center">
-                        <div className="text-6xl sm:text-7xl lg:text-8xl font-black tracking-tighter text-foreground drop-shadow-md">
-                            {formatPatience(patience)}
+                    <div className="relative z-10 flex flex-col items-center justify-center w-full h-full gap-6">
+                        {/* Speedometer Visual */}
+                        <div className="relative w-48 h-24 overflow-hidden mt-4">
+                            {/* Arc Background */}
+                            <div className="absolute w-44 h-44 rounded-full border-[12px] border-muted/20 border-t-transparent border-l-transparent -rotate-45 left-2 top-0" />
+                            {/* Arc Active (Dynamic) */}
+                            <motion.div
+                                className="absolute w-44 h-44 rounded-full border-[12px] border-primary border-t-transparent border-l-transparent -rotate-45 left-2 top-0"
+                                initial={{ rotate: -135 }}
+                                animate={{ rotate: isActive ? 45 : -135 }} // -135 to 45 degree range
+                                transition={{ duration: 1.5, type: "spring" }}
+                                style={{ borderRightColor: isActive ? '#10b981' : '#6b7280', borderBottomColor: isActive ? '#10b981' : '#6b7280' }}
+                            />
+                            {/* Needle */}
+                            <motion.div
+                                className="absolute bottom-0 left-[94px] w-1 h-24 bg-foreground origin-bottom rounded-full"
+                                initial={{ rotate: -90 }}
+                                animate={{ rotate: isActive ? 0 : -90 }}
+                                transition={{ duration: 1, type: "spring", stiffness: 50 }}
+                            />
                         </div>
-                        <div className="flex items-center gap-3 mt-4">
+
+                        <div className="flex flex-col items-center -mt-4">
+                            <div className="text-3xl sm:text-4xl font-black tracking-tighter text-foreground drop-shadow-md">
+                                {formatNumber(vdfStatus?.iterations_per_second ?? 0, false)}
+                                <span className="text-lg text-muted-foreground ml-2">iter/s</span>
+                            </div>
+
+                            {vdfStatus?.difficulty && (
+                                <div className="flex items-center gap-2 mt-2 px-3 py-1 bg-secondary/50 rounded-lg border border-border/50">
+                                    <Shield className="w-3 h-3 text-muted-foreground" />
+                                    <span className="text-xs font-mono text-muted-foreground">
+                                        Difficulty: <span className="text-foreground font-bold">{formatNumber(vdfStatus.difficulty, false)}</span>
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-3 mt-auto">
                             <span className={cn("h-2 w-2 rounded-full", isActive ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground")}></span>
                             <p className="text-xs font-medium text-muted-foreground">
-                                {isActive ? "Node is active and participating in network consensus" : "Connect to network to start accumulating patience"}
+                                {isActive ? "VDF Solver Engine is Running Efficiently" : "System Idle - Waiting for Network"}
                             </p>
                         </div>
                     </div>
-
-                    {vdfStatus?.is_active && (
-                        <div className="absolute bottom-0 left-0 w-full h-1 bg-secondary overflow-hidden">
-                            <motion.div
-                                animate={{ x: ['-100%', '300%'] }}
-                                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                                className="w-1/3 h-full bg-primary"
-                            />
-                        </div>
-                    )}
                 </div>
 
                 {/* Consensus Status Card - Dynamic Replacement */}
@@ -229,7 +253,7 @@ export default function Dashboard() {
                             </div>
                         ) : (
                             <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-red-500/20 border border-red-500/20 text-red-500 text-[10px] font-bold uppercase shadow-[0_0_10px_rgba(239,68,68,0.2)]">
-                                <Shield className="w-3 h-3" /> Quarantine
+                                <Shield className="w-3 h-3" /> Patience Mode
                             </div>
                         )}
                     </div>
@@ -248,57 +272,46 @@ export default function Dashboard() {
                                 </div>
                                 <div className="text-center">
                                     <span className="block text-3xl font-black text-emerald-400 drop-shadow-sm tracking-tight">LEADER NODE</span>
-                                    <span className="text-xs font-mono text-emerald-500/80 mt-1 uppercase tracking-wider block">Block Production Active</span>
+                                    <span className="text-xs font-mono text-emerald-500/80 mt-1 uppercase tracking-wider block">
+                                        Shard #{consensusStatus.shard_id} • Block Production Active
+                                    </span>
                                 </div>
                             </div>
                         ) : consensusStatus.state === "Queue" ? (
                             <div className="flex flex-col items-center gap-1">
-                                <span className="text-[10px] font-bold text-orange-500/70 uppercase tracking-widest mb-1">Current Position</span>
+                                <span className="text-[10px] font-bold text-orange-500/70 uppercase tracking-widest mb-1">Queue Position</span>
                                 <span className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-b from-orange-400 to-orange-600 drop-shadow-sm leading-none">
                                     #{consensusStatus.queue_position}
                                 </span>
-                                <div className="mt-4 flex items-center gap-2 text-xs font-mono bg-orange-500/10 border border-orange-500/20 px-3 py-1.5 rounded-lg text-orange-400">
-                                    <Clock className="w-3 h-3" />
-                                    <span>Est. Wait: <span className="font-bold text-orange-300">{consensusStatus.estimated_blocks} Blocks</span></span>
+                                <div className="mt-4 flex flex-col items-center gap-1">
+                                    <span className="text-xs text-muted-foreground font-mono">
+                                        Assigned Shard: <span className='text-blue-400'>#{consensusStatus.shard_id}</span>
+                                    </span>
+                                    <div className="flex items-center gap-2 text-xs font-mono bg-orange-500/10 border border-orange-500/20 px-3 py-1.5 rounded-lg text-orange-400">
+                                        <Clock className="w-3 h-3" />
+                                        <span>Wait: <span className="font-bold text-orange-300">~{consensusStatus.estimated_blocks * 2}s</span></span>
+                                    </div>
                                 </div>
                             </div>
                         ) : (
-                            // Patience State with Circular Timer
+                            // Patience State with VDF Visual
                             <div className="relative flex items-center justify-center">
-                                {/* Rotating Outer Ring */}
                                 <motion.div
                                     animate={{ rotate: 360 }}
-                                    transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
+                                    transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
                                     className="absolute inset-[-10px] w-40 h-40 rounded-full border border-red-500/20 border-t-red-500/50"
                                 />
+                                <div className="absolute inset-[-20px] w-44 h-44 rounded-full border border-dashed border-red-500/10 animate-spin-slow" />
 
-                                {/* Circular Progress */}
-                                <svg className="w-32 h-32 transform -rotate-90">
-                                    <circle
-                                        cx="64" cy="64" r="60"
-                                        stroke="currentColor"
-                                        strokeWidth="4"
-                                        fill="transparent"
-                                        className="text-red-900/20"
-                                    />
-                                    <circle
-                                        cx="64" cy="64" r="60"
-                                        stroke="currentColor"
-                                        strokeWidth="4"
-                                        fill="transparent"
-                                        strokeDasharray={377} // 2 * pi * 60
-                                        strokeDashoffset={377 * (1 - (consensusStatus.patience_progress || 0))}
-                                        strokeLinecap="round"
-                                        className="text-red-500 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)] transition-all duration-1000 ease-linear"
-                                    />
-                                </svg>
-
-                                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                                    <span className="text-[10px] font-bold text-red-500 uppercase tracking-widest mb-1">Patience</span>
-                                    <span className="text-xl font-mono font-black text-red-400 tabular-nums tracking-tighter">
-                                        {new Date((consensusStatus.remaining_seconds ?? 0) * 1000).toISOString().substring(11, 19)}
+                                <div className="flex flex-col items-center justify-center z-10 text-center">
+                                    <Gauge className="w-8 h-8 text-red-500 mb-2 animate-pulse" />
+                                    <span className="text-[10px] font-bold text-red-500 uppercase tracking-widest mb-1">Solving VDF</span>
+                                    <span className="text-xs font-mono font-bold text-red-400 tracking-tighter">
+                                        Proof of Patience
                                     </span>
-                                    <span className="text-[9px] text-red-500/60 mt-1 uppercase font-bold">Time Remaining</span>
+                                    <span className="text-[9px] text-red-500/60 mt-2 uppercase font-bold">
+                                        {((consensusStatus.patience_progress || 0) * 100).toFixed(1)}% Verified
+                                    </span>
                                 </div>
                             </div>
                         )}

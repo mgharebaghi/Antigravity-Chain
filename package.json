@@ -1,5 +1,5 @@
 {
-  "name": "tauri-appantigravity-chain",
+  "name": "centichain",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -20,6 +20,7 @@
     "lucide-react": "^0.562.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "react-force-graph-2d": "^1.29.0",
     "react-router-dom": "^7.11.0",
     "tailwind-merge": "^3.4.0"
   },

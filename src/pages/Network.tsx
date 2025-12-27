@@ -6,6 +6,7 @@ import { cn } from "../lib/utils";
 import { useApp } from "../context/AppContext";
 import { useToast } from "../context/ToastContext";
 import { listen } from "@tauri-apps/api/event";
+import NetworkMap from "../components/NetworkMap";
 
 interface PeerInfo {
     peer_id: string;
@@ -89,7 +90,7 @@ export default function Network() {
     };
 
     return (
-        <div className="flex flex-col gap-6 h-full pb-10">
+        <div className="flex flex-col gap-4 h-full pb-6 overflow-x-hidden">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Network Status</h1>
@@ -108,6 +109,11 @@ export default function Network() {
                         {relayStatus || "Measuring..."}
                     </span>
                 </div>
+            </div>
+
+            {/* [NEW] Network Map Visualization */}
+            <div className="w-full">
+                <NetworkMap />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

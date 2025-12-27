@@ -1,7 +1,7 @@
-# Antigravity Chain 🚀
+# Centichain 🚀
 **The World's Fastest Decentralized L1 Engine**
 
-Antigravity is a revolutionary Layer 1 blockchain built using **Tauri**, **Rust**, and **React**. It features a unique **Parallel DAG** architecture and **VDF-based consensus** (Proof of Patience) to achieve ultra-high throughput without centralizing the network.
+Centichain is a revolutionary Layer 1 blockchain built using **Tauri**, **Rust**, and **React**. It features a unique **Parallel DAG** architecture and **VDF-based consensus** (Proof of Patience) to achieve ultra-high throughput without centralizing the network.
 
 ## 🌟 Key Features
 - **Parallel Execution**: Dependency-aware transaction processing using Block-STM logic.
@@ -37,8 +37,8 @@ npm run tauri dev
 ```
 
 ## 📖 Documentation
-- [Technical Whitepaper (English)](WHITEPAPER.md)
-- [Technical Whitepaper (Persian)](WHITEPAPER_FA.md)
+- [Technical Whitepaper (English)](CENTICHAIN_WHITEPAPER.md)
+- [Technical Whitepaper (Persian)](CENTICHAIN_WHITEPAPER_FA.md)
 - [Tokenomics Guide](documentation.md)
 
 ## ⚖️ Tokenomics Summary

@@ -8,6 +8,13 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use centichain_lib::{
+    chain::{Block, SyncRequest, SyncResponse, Transaction},
+    consensus::Consensus,
+    mempool::Mempool,
+    p2p::message_id_fn,
+    storage::Storage,
+};
 use libp2p::{
     futures::StreamExt,
     gossipsub, identity, kad, mdns,
@@ -23,13 +30,6 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::Duration;
-use tauri_appantigravity_chain_lib::{
-    chain::{Block, SyncRequest, SyncResponse, Transaction},
-    consensus::Consensus,
-    mempool::Mempool,
-    p2p::message_id_fn,
-    storage::Storage,
-};
 use tokio::io;
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
@@ -56,10 +56,10 @@ enum Event {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Logger
     flexi_logger::Logger::try_with_str("info")?.start()?;
-    log::info!("Starting Antigravity RPC Node (Advanced)...");
+    log::info!("Starting Centichain RPC Node (Advanced)...");
 
     // Initialize Components
-    let storage = Arc::new(Storage::new("antigravity.db")?); // Same DB as main app if running in same dir
+    let storage = Arc::new(Storage::new("centichain.db")?); // Same DB as main app if running in same dir
     let mempool = Arc::new(Mempool::new(storage.clone()));
     let consensus = Arc::new(Mutex::new(Consensus::new()));
 
@@ -106,7 +106,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut kad_config = kad::Config::default();
             kad_config
-                .set_protocol_names(vec![libp2p::StreamProtocol::new("/antigravity/kad/1.0.0")]);
+                .set_protocol_names(vec![libp2p::StreamProtocol::new("/centichain/kad/1.0.0")]);
             let kad = kad::Behaviour::with_config(
                 key.public().to_peer_id(),
                 kad::store::MemoryStore::new(key.public().to_peer_id()),
@@ -123,13 +123,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 relay_client,
                 dcutr: libp2p::dcutr::Behaviour::new(key.public().to_peer_id()),
                 identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                    "/antigravity/1.0.0".to_string(),
+                    "/centichain/1.0.0".to_string(),
                     key.public(),
                 )),
                 ping: libp2p::ping::Behaviour::new(libp2p::ping::Config::new()),
                 sync: libp2p::request_response::cbor::Behaviour::new(
                     [(
-                        libp2p::StreamProtocol::new("/antigravity/sync/1.0.0"),
+                        libp2p::StreamProtocol::new("/centichain/sync/1.0.0"),
                         libp2p::request_response::ProtocolSupport::Full,
                     )],
                     libp2p::request_response::Config::default(),
@@ -140,8 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     // Subscribe topics (Standardized Shard 0 for RPC)
-    let topic_blocks = gossipsub::IdentTopic::new("antigravity-shard-0-blocks");
-    let topic_transactions = gossipsub::IdentTopic::new("antigravity-shard-0-txs");
+    let topic_blocks = gossipsub::IdentTopic::new("centichain-shard-0-blocks");
+    let topic_transactions = gossipsub::IdentTopic::new("centichain-shard-0-txs");
     swarm.behaviour_mut().gossipsub.subscribe(&topic_blocks)?;
     swarm
         .behaviour_mut()
@@ -257,6 +257,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                  log::info!("P2P: Relay identified. Bootstrapping DHT...");
                                  let _ = swarm.behaviour_mut().kad.bootstrap();
                             }
+                        }
+
+                        // Instant Sync: If this is NOT the relay, and we are connected, request height
+                        if Some(peer_id) != relay_peer_id_opt && swarm.is_connected(&peer_id) {
+                             log::info!("P2P Sync: Identified NEW node {}. Requesting height...", peer_id);
+                             let _ = swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
+                        }
+                    }
+                    SwarmEvent::Behaviour(HeaderlessBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { result, .. })) => {
+                        match result {
+                            kad::QueryResult::GetClosestPeers(Ok(ok)) => {
+                                for peer in ok.peers {
+                                    if Some(peer) != relay_peer_id_opt && !swarm.is_connected(&peer) {
+                                        log::info!("P2P: Dialing neighbor found in DHT query: {}", peer);
+                                        let _ = swarm.dial(peer);
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     SwarmEvent::Behaviour(HeaderlessBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
@@ -392,7 +411,7 @@ async fn websocket_connection(mut socket: WebSocket, state: Arc<AppState>) {
     let mut rx = state.evt_sender.subscribe();
     if let Err(e) = socket
         .send(Message::Text(
-            "Connected to Antigravity Real-time Feed".to_string(),
+            "Connected to Centichain Real-time Feed".to_string(),
         ))
         .await
     {
@@ -423,7 +442,7 @@ async fn get_status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         node_type: "RPC".to_string(),
         chain_height: height,
         peer_count: peers,
-        network: "Antigravity Mainnet".to_string(),
+        network: "Centichain Mainnet".to_string(),
     })
 }
 
@@ -458,17 +477,16 @@ struct NetworkStats {
 
 async fn get_network_stats(State(state): State<Arc<AppState>>) -> Json<NetworkStats> {
     let height = state.chain_index.load(Ordering::Relaxed);
-    let supply = tauri_appantigravity_chain_lib::chain::calculate_circulating_supply(height);
-    let reward = tauri_appantigravity_chain_lib::chain::calculate_mining_reward(height + 1);
+    let supply = centichain_lib::chain::calculate_circulating_supply(height);
+    let reward = centichain_lib::chain::calculate_mining_reward(height + 1);
 
     // Calculate simple halving info
-    let current_interval = height / tauri_appantigravity_chain_lib::chain::HALVING_INTERVAL;
-    let next_halving =
-        (current_interval + 1) * tauri_appantigravity_chain_lib::chain::HALVING_INTERVAL;
+    let current_interval = height / centichain_lib::chain::HALVING_INTERVAL;
+    let next_halving = (current_interval + 1) * centichain_lib::chain::HALVING_INTERVAL;
 
     Json(NetworkStats {
         supply,
-        max_supply: tauri_appantigravity_chain_lib::chain::TOTAL_SUPPLY,
+        max_supply: centichain_lib::chain::TOTAL_SUPPLY,
         circulating: supply, // Simplifying for now
         halving_block: next_halving,
         current_reward: reward,

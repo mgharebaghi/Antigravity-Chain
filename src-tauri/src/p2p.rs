@@ -18,7 +18,7 @@ pub fn message_id_fn(message: &gossipsub::Message) -> gossipsub::MessageId {
 }
 
 #[derive(NetworkBehaviour)]
-pub struct AntigravityBehaviour {
+pub struct CentichainBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     pub kad: kad::Behaviour<kad::store::MemoryStore>,
     pub mdns: mdns::tokio::Behaviour,
@@ -32,7 +32,7 @@ pub struct AntigravityBehaviour {
     >,
 }
 
-const SYNC_PROTOCOL: &str = "/antigravity/sync/1.0.0";
+const SYNC_PROTOCOL: &str = "/centichain/sync/1.0.0";
 
 use tauri::{AppHandle, Emitter};
 
@@ -65,6 +65,7 @@ pub async fn start_p2p_node(
     mut block_receiver: tokio::sync::mpsc::Receiver<Box<crate::chain::Block>>,
     mut tx_receiver: tokio::sync::mpsc::Receiver<crate::chain::Transaction>,
     mut receipt_receiver: tokio::sync::mpsc::Receiver<crate::chain::Receipt>,
+    mut vdf_receiver: tokio::sync::mpsc::Receiver<crate::chain::VdfProofMessage>, // New Arg
     node_type: Arc<Mutex<crate::NodeType>>,
     wallet_keypair: Option<identity::Keypair>,
     mut cmd_rx: tokio::sync::mpsc::Receiver<P2PCommand>,
@@ -106,7 +107,7 @@ pub async fn start_p2p_node(
             // Kademlia DHT
             let mut kad_config = kad::Config::default();
             kad_config
-                .set_protocol_names(vec![libp2p::StreamProtocol::new("/antigravity/kad/1.0.0")]);
+                .set_protocol_names(vec![libp2p::StreamProtocol::new("/centichain/kad/1.0.0")]);
             let store = kad::store::MemoryStore::new(key.public().to_peer_id());
             let kad = kad::Behaviour::with_config(key.public().to_peer_id(), store, kad_config);
 
@@ -119,7 +120,7 @@ pub async fn start_p2p_node(
 
             // Identify
             let identify = libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
-                "/antigravity/1.0.0".to_string(),
+                "/centichain/1.0.0".to_string(),
                 key.public(),
             ));
 
@@ -137,7 +138,7 @@ pub async fn start_p2p_node(
                 libp2p::request_response::Config::default(),
             );
 
-            Ok(AntigravityBehaviour {
+            Ok(CentichainBehaviour {
                 gossipsub,
                 kad,
                 mdns,
@@ -160,9 +161,12 @@ pub async fn start_p2p_node(
     log::info!("P2P: Subscribing to Shard #{} topics", shard_id);
 
     let topic_shard_blocks =
-        gossipsub::IdentTopic::new(format!("antigravity-shard-{}-blocks", shard_id));
-    let topic_shard_txs = gossipsub::IdentTopic::new(format!("antigravity-shard-{}-txs", shard_id));
-    let topic_receipts = gossipsub::IdentTopic::new("antigravity-receipts");
+        gossipsub::IdentTopic::new(format!("centichain-shard-{}-blocks", shard_id));
+    let topic_shard_txs = gossipsub::IdentTopic::new(format!("centichain-shard-{}-txs", shard_id));
+    let topic_receipts = gossipsub::IdentTopic::new("centichain-receipts");
+    let topic_vdf_proofs = gossipsub::IdentTopic::new("centichain-vdf-proofs");
+    // [NEW] Topology Gossip Topic
+    let topic_topology = gossipsub::IdentTopic::new("centichain-topology");
 
     swarm
         .behaviour_mut()
@@ -173,6 +177,12 @@ pub async fn start_p2p_node(
         .gossipsub
         .subscribe(&topic_shard_txs)?;
     swarm.behaviour_mut().gossipsub.subscribe(&topic_receipts)?;
+    swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&topic_vdf_proofs)?;
+    // [NEW] Subscribe
+    swarm.behaviour_mut().gossipsub.subscribe(&topic_topology)?;
 
     // Listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
@@ -221,16 +231,9 @@ pub async fn start_p2p_node(
                 swarm.add_external_address(external_addr);
             }
 
-            // Add relay to Kademlia as a bootstrap point
-            if let Some(relay_peer_id) = relay_addr_parsed.iter().find_map(|p| match p {
-                Protocol::P2p(id) => Some(id),
-                _ => None,
-            }) {
-                swarm
-                    .behaviour_mut()
-                    .kad
-                    .add_address(&relay_peer_id, relay_addr_parsed.clone());
-            }
+            // Relay is connected, but we do NOT add it to Kademlia DHT.
+            // User Requirement: "Leader (Relay) should not be in DHT".
+            // We rely on Identify/Mdns/Gossip for finding REAL peers.
         }
         Err(e) => {
             log::error!("Failed to dial relay: {}", e);
@@ -241,13 +244,19 @@ pub async fn start_p2p_node(
     let _ = app_handle.emit("relay-status", "Connecting...");
     let _ = app_handle.emit("node-status", "Connecting");
 
-    let relay_peer_id_opt = relay_addr_parsed.iter().find_map(|p| match p {
+    let mut relay_peer_id_opt = relay_addr_parsed.iter().find_map(|p| match p {
         Protocol::P2p(id) => Some(id),
         _ => None,
     });
 
+    // [NEW] Network Graph State: PeerId -> Vec<PeerId> (Neighbors)
+    let mut network_graph: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
     // Event Loop
     let mut check_interval = tokio::time::interval(Duration::from_secs(1));
+    let mut discovery_interval = tokio::time::interval(Duration::from_secs(15)); // New explicit discovery interval
+    let mut topology_gossip_interval = tokio::time::interval(Duration::from_secs(30)); // [NEW] Broadcast topology
 
     loop {
         if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
@@ -290,7 +299,6 @@ pub async fn start_p2p_node(
             _ = tokio::time::sleep(Duration::from_secs(10)) => {
                  // Emit DHT info for UI
                  let mut dht_peers = Vec::new();
-                 // Correctly iterate Kademlia buckets
                  for bucket in swarm.behaviour_mut().kad.kbuckets() {
                      for entry in bucket.iter() {
                          dht_peers.push(entry.node.key.preimage().to_string());
@@ -299,10 +307,17 @@ pub async fn start_p2p_node(
                  let _ = app_handle.emit("dht-peers-update", dht_peers);
 
                  if !is_synced.load(Ordering::Relaxed) {
-                     // 1. Re-query DHT to find new peers
-                     if let Some(relay_id) = relay_peer_id_opt {
-                         let _ = swarm.behaviour_mut().kad.get_closest_peers(relay_id);
+                     // 1. Re-query DHT to find new peers - SEARCH FOR SELF to find nodes near us
+                     log::info!("P2P Loop: Expanding discovery. Searching DHT for neighbors...");
+
+                     // Query for self (standard Kademlia refresh)
+                     swarm.behaviour_mut().kad.get_closest_peers(local_peer_id);
+
+                     // Also query for the RELAY's neighbors (to find anyone else connected to it)
+                     if let Some(rid) = relay_peer_id_opt {
+                         swarm.behaviour_mut().kad.get_closest_peers(rid);
                      }
+
                      // 2. Ask existing peers for height
                      let peers: Vec<PeerId> = swarm.connected_peers().cloned().collect();
                      for peer in peers {
@@ -314,6 +329,48 @@ pub async fn start_p2p_node(
                  }
             }
 
+            // Periodic "Random Walk" Discovery
+            _ = discovery_interval.tick() => {
+                 let connected = swarm.connected_peers().count();
+                 if connected < 5 { // If we have few peers, aggressively look for more
+                     log::info!("P2P Loop: Performing Random Walk for Discovery...");
+                     let random_peer_id = PeerId::random();
+                     swarm.behaviour_mut().kad.get_closest_peers(random_peer_id);
+                 }
+            }
+
+            // [NEW] Topology Gossip Broadcast
+            _ = topology_gossip_interval.tick() => {
+                 let connected_peers: Vec<String> = swarm.connected_peers().map(|p| p.to_string()).collect();
+                 // Create TopologyUpdate message
+                 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+                 struct TopologyUpdate {
+                    source: String,
+                    connections: Vec<String>,
+                    timestamp: u64,
+                 }
+
+                 let update = TopologyUpdate {
+                    source: local_peer_id.to_string(),
+                    connections: connected_peers.clone(),
+                    timestamp: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                 };
+
+                 // Update Local Graph with Self
+                 network_graph.insert(local_peer_id.to_string(), connected_peers);
+                 // Emit local update immediately
+                 let _ = app_handle.emit("network-topology-update", network_graph.clone());
+
+                 match serde_json::to_vec(&update) {
+                    Ok(json) => {
+                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_topology.clone(), json) {
+                             log::error!("Gossip topology publish error: {:?}", e);
+                         }
+                    }
+                    Err(e) => log::error!("Failed to serialize topology update: {:?}", e),
+                 }
+            }
+
             _ = check_interval.tick() => {
                  let total_peers = swarm.network_info().num_peers();
                  let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
@@ -322,8 +379,21 @@ pub async fn start_p2p_node(
                  peer_count.store(valid_peers, Ordering::Relaxed);
                  let _ = app_handle.emit("peer-count", valid_peers);
 
-                 validator_count.store(valid_peers, Ordering::Relaxed);
-                 let _ = app_handle.emit("validator-count", valid_peers);
+                 // CHECK: First Node Logic
+                 // If we have 0 valid peers (active validators), we are the First Node.
+                 // We should assume we are Synced and ready to Mine immediately.
+                 if valid_peers == 0 && !is_synced.load(Ordering::Relaxed) {
+                     log::info!("No peers detected. Assuming Role: FIRST NODE (Genesis). State -> Synced.");
+                     is_synced.store(true, Ordering::Relaxed);
+                     let _ = app_handle.emit("node-status", "Active (First Node)");
+                 }
+
+                 let v_count = {
+                     let c = consensus.lock().unwrap();
+                     c.nodes.len()
+                 };
+                 validator_count.store(v_count, Ordering::Relaxed);
+                 let _ = app_handle.emit("validator-count", v_count);
             }
 
             Some(block) = block_receiver.recv() => {
@@ -350,12 +420,20 @@ pub async fn start_p2p_node(
                 }
             }
 
+            Some(vdf_msg) = vdf_receiver.recv() => {
+                log::info!("Broadcasting VDF Proof for {}", vdf_msg.peer_id);
+                let json = serde_json::to_vec(&vdf_msg).unwrap();
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic_vdf_proofs.clone(), json) {
+                    log::error!("Gossip VDF publish error: {:?}", e);
+                }
+            }
+
             event = swarm.select_next_some() => match event {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     log::info!("Local node is listening on {:?}", address);
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Identify(libp2p::identify::Event::Received {
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Identify(libp2p::identify::Event::Received {
                     peer_id,
                     info,
                     ..
@@ -363,18 +441,33 @@ pub async fn start_p2p_node(
                     log::info!("Identified peer {:?} with version {:?}", peer_id, info.protocol_version);
 
                     // CRITICAL: Populate Kademlia DHT with the addresses we just learned.
-                    for addr in &info.listen_addrs {
-                        swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    // BUT ONLY IF IT IS NOT THE RELAY (Leader)
+                    // Check if this peer matches our known relay peer ID
+                    let is_relay = Some(peer_id) == relay_peer_id_opt
+                        || info.listen_addrs.iter().any(|a| a.to_string().contains(&relay_addr));
+
+                    if !is_relay {
+                         for addr in &info.listen_addrs {
+                             swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                         }
+                    } else {
+                        log::info!("Ignored Relay for DHT: {:?}", peer_id);
                     }
 
-                    // If this is the RELAY, trigger a bootstrap now that we have its identified address
-                    if let Some(rid) = relay_peer_id_opt {
-                        if rid == peer_id {
-                             log::info!("P2P: Relay identified. Bootstrapping DHT...");
+                    // Fallback Relay Detection
+                    if relay_peer_id_opt.is_none() && info.listen_addrs.iter().any(|a| a.to_string().contains(&relay_addr)) {
+                         log::info!("Relay Identified via listen address match: {}", peer_id);
+                         relay_peer_id_opt = Some(peer_id);
+                    }
+
+                    // If this is the RELAY (detected now or before)
+                    if Some(peer_id) == relay_peer_id_opt {
+                             log::info!("P2P: Relay identified ({:?}). Bootstrapping DHT...", peer_id);
                              if let Err(e) = swarm.behaviour_mut().kad.bootstrap() {
                                  log::error!("Kademlia bootstrap error: {:?}", e);
                              }
-                        }
+                             // Safety: Ensure relay is removed from consensus
+                             consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
                     }
 
                     // PROACTIVE: If we aren't synced, ask this peer for their height immediately.
@@ -383,13 +476,16 @@ pub async fn start_p2p_node(
                          swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
                     }
 
-                    let mut c = consensus.lock().unwrap();
-                    let pid_str = peer_id.to_string();
-                    let node = c.nodes.entry(pid_str.clone()).or_insert_with(|| crate::consensus::NodeState::new(pid_str));
-                    node.addresses = info.listen_addrs.iter().map(|a| a.to_string()).collect();
+                    // Only add to consensus if it is NOT the relay
+                    if Some(peer_id) != relay_peer_id_opt {
+                        let mut c = consensus.lock().unwrap();
+                        let pid_str = peer_id.to_string();
+                        let node = c.nodes.entry(pid_str.clone()).or_insert_with(|| crate::consensus::NodeState::new(pid_str));
+                        node.addresses = info.listen_addrs.iter().map(|a| a.to_string()).collect();
+                    }
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
                         let _ = swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
@@ -397,14 +493,14 @@ pub async fn start_p2p_node(
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                     for (peer_id, _multiaddr) in list {
                         swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
                     }
                     peer_count.store(swarm.network_info().num_peers(), Ordering::Relaxed);
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Gossipsub(
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Gossipsub(
                     gossipsub::Event::Message {
                         propagation_source: peer_id,
                         message,
@@ -413,21 +509,47 @@ pub async fn start_p2p_node(
                 )) => {
                     if message.topic.as_str() == topic_shard_blocks.hash().as_str() {
                          if let Ok(block) = serde_json::from_slice::<Block>(&message.data) {
-                              log::info!("Received Gossip Block #{} from {}", block.index, peer_id);
-                              if let Ok(_) = storage.save_block(&block) {
-                                  chain_index.store(block.index, Ordering::Relaxed);
-                                  let _ = app_handle.emit("new-block", block);
-                              }
+                               log::info!("Received Gossip Block #{} from {}", block.index, peer_id);
+                               if let Ok(_) = storage.save_block(&block) {
+                                   chain_index.store(block.index, Ordering::Relaxed);
+                                   let _ = app_handle.emit("new-block", block);
+                               }
                          }
                     } else if message.topic.as_str() == topic_shard_txs.hash().as_str() {
                          if let Ok(tx) = serde_json::from_slice::<Transaction>(&message.data) {
                              let _ = mempool.add_transaction(tx.clone());
                              let _ = app_handle.emit("new-transaction", tx);
                          }
+                    } else if message.topic.as_str() == topic_vdf_proofs.hash().as_str() {
+                        if let Ok(msg) = serde_json::from_slice::<crate::chain::VdfProofMessage>(&message.data) {
+                            log::info!("Received VDF Proof from {}", msg.peer_id);
+                            let mut c = consensus.lock().unwrap();
+                            if c.verify_peer(msg.peer_id.clone(), msg.proof) {
+                                log::info!("Verified peer {} via VDF! Trust Score set to 1.0", msg.peer_id);
+                                let _ = app_handle.emit("peer-update", msg.peer_id);
+                            } else {
+                                log::warn!("Invalid VDF Proof from {}", msg.peer_id);
+                            }
+                        }
+                    } else if message.topic.as_str() == topic_topology.hash().as_str() {
+                        // [NEW] Handle Topology Gossip
+                         #[derive(serde::Serialize, serde::Deserialize, Debug)]
+                         struct TopologyUpdate {
+                            source: String,
+                            connections: Vec<String>,
+                            timestamp: u64,
+                         }
+
+                        if let Ok(msg) = serde_json::from_slice::<TopologyUpdate>(&message.data) {
+                            // Update graph
+                            network_graph.insert(msg.source, msg.connections);
+                            // Emit raw graph to frontend
+                            let _ = app_handle.emit("network-topology-update", network_graph.clone());
+                        }
                     }
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Sync(
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Sync(
                     libp2p::request_response::Event::Message { peer, message, .. },
                 )) => match message {
                     libp2p::request_response::Message::Request { request, channel, .. } => {
@@ -548,8 +670,12 @@ pub async fn start_p2p_node(
 
                 SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                     let remote_addr = endpoint.get_remote_address().to_string();
+
+                    // Allow broad match for relay (configured addr vs detected addr)
                     if endpoint.is_dialer() && remote_addr.contains(&relay_addr) {
-                        log::info!("Relay connection established with {}", peer_id);
+                        log::info!("Relay connection established with {}. (Address Match)", peer_id);
+                        relay_peer_id_opt = Some(peer_id); // Capture the Relay Peer ID
+
                         let _ = app_handle.emit("relay-status", "connected");
                         let _ = app_handle.emit("relay-info", peer_id.to_string());
                         consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
@@ -576,27 +702,38 @@ pub async fn start_p2p_node(
                     peer_count.store(valid_peers, Ordering::Relaxed);
                 }
 
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { .. })) => {
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { .. })) => {
                     log::info!("Relay reservation accepted! Visible to network.");
                     let _ = app_handle.emit("relay-status", "connected");
                 }
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::RelayClient(relay::client::Event::ReservationReqFailed { error, .. })) => {
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::RelayClient(relay::client::Event::ReservationReqFailed { error, .. })) => {
                     log::error!("Relay reservation failed: {:?}", error);
                     let _ = app_handle.emit("relay-status", "reservation-failed");
                 }
-                SwarmEvent::Behaviour(AntigravityBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
-                     log::info!("Kademlia: Found peer {} via DHT", peer);
-                     // CRITICAL: DHT found a peer, but we might not be connected to them.
-                     // We MUST dial them to establish a GossipSub/RequestResponse link.
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { result, .. })) => {
+                    match result {
+                        kad::QueryResult::GetClosestPeers(Ok(ok)) => {
+                            for peer in ok.peers {
+                                log::info!("Kademlia: Discovered neighbor {} via Query", peer);
+                                if Some(peer) != relay_peer_id_opt && !swarm.is_connected(&peer) {
+                                    log::info!("P2P: Actively dialing neighbor {}", peer);
+                                    let _ = swarm.dial(peer);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                SwarmEvent::Behaviour(CentichainBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
                      if Some(peer) != relay_peer_id_opt {
+                         log::info!("Kademlia: Routing Table updated with peer {}", peer);
                          if !swarm.is_connected(&peer) {
                              log::info!("P2P: Dialing discovered peer {}", peer);
-                             let _ = swarm.dial(peer);
-                         } else {
-                             // Already connected, maybe try to sync?
-                             if !is_synced.load(Ordering::Relaxed) {
-                                  swarm.behaviour_mut().sync.send_request(&peer, SyncRequest::GetHeight);
-                             }
+                             log::info!("P2P: Dialing discovered peer {}", peer);
+                             let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                                .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
+                                .build();
+                             let _ = swarm.dial(dial_opts);
                          }
                      }
                      // Update peer count (excluding relay)

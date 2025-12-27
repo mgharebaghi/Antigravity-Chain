@@ -77,7 +77,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                         </div>
                     </div>
                     <div>
-                        <span className="font-bold text-xl tracking-tight block">Antigravity</span>
+                        <span className="font-bold text-xl tracking-tight block">Centichain</span>
                         <span className="text-[10px] text-muted-foreground uppercase tracking-widest font-semibold text-gradient">Chain Node</span>
                     </div>
                 </div>
@@ -229,7 +229,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                                     <div className="h-9 w-9 bg-primary/20 rounded-xl flex items-center justify-center border border-primary/20">
                                         <Activity className="h-5 w-5 text-primary" />
                                     </div>
-                                    <span className="font-bold text-xl">Antigravity</span>
+                                    <span className="font-bold text-xl">Centichain</span>
                                 </div>
                                 <Button variant="ghost" size="icon" onClick={() => setSidebarOpen(false)}>
                                     <X className="h-5 w-5" />

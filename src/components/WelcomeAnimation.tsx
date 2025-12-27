@@ -47,7 +47,7 @@ export const WelcomeAnimation = () => {
                     animate={{ y: 0, opacity: 1 }}
                     className="text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-600 mb-4"
                 >
-                    Welcome to Antigravity
+                    Welcome to Centichain
                 </motion.h1>
 
                 <div className="h-8 flex flex-col items-center">

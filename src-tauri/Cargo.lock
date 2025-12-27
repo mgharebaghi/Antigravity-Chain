@@ -667,6 +667,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "centichain"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.21.7",
+ "bincode",
+ "bip39",
+ "chrono",
+ "flexi_logger",
+ "futures",
+ "hex",
+ "libp2p",
+ "log",
+ "num-bigint",
+ "num-traits",
+ "rand 0.8.5",
+ "redb",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+ "tower-http 0.5.2",
+ "uuid",
+]
+
+[[package]]
 name = "cesu8"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5489,36 +5519,6 @@ dependencies = [
  "webview2-com",
  "window-vibrancy",
  "windows 0.61.3",
-]
-
-[[package]]
-name = "tauri-appantigravity-chain"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64 0.21.7",
- "bincode",
- "bip39",
- "chrono",
- "flexi_logger",
- "futures",
- "hex",
- "libp2p",
- "log",
- "num-bigint",
- "num-traits",
- "rand 0.8.5",
- "redb",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "tower-http 0.5.2",
- "uuid",
 ]
 
 [[package]]

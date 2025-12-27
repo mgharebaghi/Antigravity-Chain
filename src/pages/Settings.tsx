@@ -32,7 +32,7 @@ export default function Settings() {
     const { success, error } = useToast();
     // const { theme } = useTheme();
     const [settings, setSettings] = useState<AppSettings>({
-        node_name: "Antigravity-Node-01",
+        node_name: "Centichain-Node-01",
         relay_address: "/ip4/127.0.0.1/tcp/9090",
         mining_enabled: true,
         max_peers: 50,

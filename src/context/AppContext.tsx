@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from '@tauri-apps/api/event';
+import { useToast } from './ToastContext';
 
 // Types
 export interface WalletInfo {
@@ -66,6 +67,8 @@ export interface NodeConsensusStatus {
     estimated_blocks: number;
     patience_progress: number;
     remaining_seconds: number;
+    shard_id: number;
+    is_slot_leader: boolean;
 }
 
 interface AppContextType {
@@ -112,6 +115,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const [vdfStatus, setVdfStatus] = useState<VdfStatus | null>(null);
     const [selfNodeInfo, setSelfNodeInfo] = useState<SelfNodeInfo | null>(null);
     const [consensusStatus, setConsensusStatus] = useState<NodeConsensusStatus | null>(null);
+    const { success, info } = useToast();
 
     // Initial load
     useEffect(() => {
@@ -122,6 +126,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const unlistenNode = listen('node-status', (event: any) => {
             console.log("Node Status Event:", event.payload);
             setNodeStatus(event.payload);
+
+            if (event.payload === "Active") {
+                success("Node Synchronized! Mining Active.");
+            }
+            if (event.payload === "Sync Retrying...") {
+                info("Sync Failed. Retrying with new peers...");
+            }
         });
 
         const unlistenRelay = listen('relay-status', (event: any) => {
@@ -134,7 +145,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
         const unlistenRelayInfo = listen('relay-info', (event: any) => {
             console.log("Relay Info Event:", event.payload);
-            setConnectedRelay(event.payload);
+            const relayName = event.payload;
+
+            // Only notify if it's a new connection or different one
+            // (Check inside setConnectedRelay callback to be safe, or just fire)
+            info(`Connected to Relay Node: ${relayName}`);
+            setConnectedRelay(relayName);
         });
 
         const unlistenPeerCount = listen('peer-count', (event: any) => {

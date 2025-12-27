@@ -102,7 +102,7 @@ export default function Wallet() {
                                 </div>
                                 <div className="space-y-2">
                                     <h1 className="text-3xl font-black tracking-tight">Connect Wallet</h1>
-                                    <p className="text-muted-foreground">Initialize your identity to start interacting with the Antigravity Chain.</p>
+                                    <p className="text-muted-foreground">Initialize your identity to start interacting with the Centichain Chain.</p>
                                 </div>
 
                                 <div className="grid grid-cols-1 gap-4 w-full">
@@ -221,7 +221,7 @@ export default function Wallet() {
                         <div className="relative z-10 flex flex-col gap-8">
                             <div className="flex items-center justify-between">
                                 <Badge variant="outline" className="border-white/20 text-white bg-white/5 backdrop-blur-md px-3 py-1 font-normal tracking-wide">
-                                    Antigravity Mainnet
+                                    Centichain Mainnet
                                 </Badge>
                                 <Pickaxe className="w-6 h-6 text-white/50" />
                             </div>

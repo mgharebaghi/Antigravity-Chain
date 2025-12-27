@@ -36,6 +36,14 @@ impl Transaction {
     }
 }
 
+/// Status of a cross-shard transfer to ensure atomicity.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum ReceiptStatus {
+    Pending,
+    Claimed,  // Successfully minted on target shard
+    Reverted, // Target failed, funds returned on source shard
+}
+
 /// A Receipt proves that a transaction was executed on a Source Shard
 /// and funds were burned/locked, allowing the Destination Shard to mint/unlock them.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -47,6 +55,7 @@ pub struct Receipt {
     pub receiver: String,
     pub block_hash: String,        // Block on source shard where burn happened
     pub merkle_proof: Vec<String>, // Proof of inclusion
+    pub status: ReceiptStatus,     // New: For Atomicity
 }
 
 /// Cross-Link is a summary of a Shard's block header, signed by the shard's committee,
@@ -58,6 +67,14 @@ pub struct CrossLink {
     pub block_hash: String,
     pub state_root: String,
     pub signature: String, // Aggregated BLS signature (simplified to string here)
+}
+
+/// Message broadcast via P2P when a node solves the VDF
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VdfProofMessage {
+    pub peer_id: String,
+    pub proof: String,
+    pub challenge: String,
 }
 
 pub fn calculate_fee(amount: u64) -> u64 {
@@ -245,8 +262,8 @@ impl Block {
     }
 
     pub fn is_vdf_valid(&self) -> bool {
-        use crate::vdf::AntigravityVDF;
-        let vdf = AntigravityVDF::new(self.vdf_difficulty);
+        use crate::vdf::CentichainVDF;
+        let vdf = CentichainVDF::new(self.vdf_difficulty);
         let mut clone = self.clone();
         clone.vdf_proof = String::new();
         let challenge = clone.calculate_hash();

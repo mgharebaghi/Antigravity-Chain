@@ -8,7 +8,7 @@ pub mod wallet;
 
 use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
 
-use crate::vdf::AntigravityVDF;
+use crate::vdf::CentichainVDF;
 use chain::Transaction;
 use consensus::Consensus;
 use mempool::Mempool;
@@ -46,7 +46,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            node_name: "Antigravity-Node-01".to_string(),
+            node_name: "Centichain-Node-01".to_string(),
             relay_address: "/ip4/127.0.0.1/tcp/9090".to_string(),
             mining_enabled: true,
             max_peers: 50,
@@ -310,7 +310,10 @@ async fn start_node(
     // Create Channels
     let (block_sender, block_receiver) = tokio::sync::mpsc::channel::<Box<chain::Block>>(100);
     let (tx_sender, tx_receiver) = tokio::sync::mpsc::channel::<chain::Transaction>(1000);
+
     let (receipt_sender, receipt_receiver) = tokio::sync::mpsc::channel::<chain::Receipt>(1000);
+    // New Channel for broadcasting VDF Proofs
+    let (vdf_sender, vdf_receiver) = tokio::sync::mpsc::channel::<chain::VdfProofMessage>(100);
 
     {
         let mut ts = state.tx_sender.lock().unwrap();
@@ -369,6 +372,7 @@ async fn start_node(
             block_receiver,
             tx_receiver,
             receipt_receiver,
+            vdf_receiver,
             node_type_p2p,
             wallet_keypair,
             cmd_rx,
@@ -437,7 +441,7 @@ async fn start_node(
 
             // Benchmark VDF performance
             let start = std::time::Instant::now();
-            let vdf = AntigravityVDF::new(50_000); // Small batch for responsiveness
+            let vdf = CentichainVDF::new(50_000); // Small batch for responsiveness
             vdf.solve(b"heartbeat_challenge");
             let elapsed = start.elapsed();
 
@@ -485,150 +489,278 @@ async fn start_node(
         }
 
         if !relay_connected {
-            println!("Mining Loop: Relay connection failed. Keep trying for Real-World Network...");
-            let _ = app_handle_loop.emit("node-status", "Waiting for Relay...");
-            return; // Exit thread, let user/system retry or have a wrapper loop
+            println!("Mining Loop: Relay connection failed. Proceeding in Solo/Offline Mode...");
+            let _ = app_handle_loop.emit("node-status", "Relay Unreachable. Starting Solo...");
         }
 
         // Phase 2: Discovery via Relay & DHT
-        // Real-world: We must wait for the DHT to bootstrap via the relay to find other peers.
-        let mut discovery_ticks = 0;
-        let max_discovery_ticks = 15; // 15 seconds to find peers
+        'discovery_outer: loop {
+            // Real-world: We must wait for the DHT to bootstrap via the relay to find other peers.
+            let mut discovery_ticks = 0;
+            // If relay is connected, give DHT time (60s). If not, just brief check (5s) for MDNS.
+            let max_discovery_ticks = if relay_connected { 60 } else { 5 };
 
-        while discovery_ticks < max_discovery_ticks {
-            let v_count = validator_count_loop.load(Ordering::Relaxed);
-            if v_count > 0 {
-                println!("Mining Loop: Discovery Success! Found {} peers.", v_count);
-                break;
+            while discovery_ticks < max_discovery_ticks {
+                let v_count = validator_count_loop.load(Ordering::Relaxed);
+                if v_count > 0 {
+                    println!("Mining Loop: Discovery Success! Found {} peers.", v_count);
+                    break;
+                }
+
+                let _ = app_handle_loop.emit(
+                    "node-status",
+                    format!(
+                        "Discovering Peers... ({}/{})",
+                        discovery_ticks, max_discovery_ticks
+                    ),
+                );
+
+                // Active Discovery Ping every 5 seconds
+                if discovery_ticks % 5 == 0 {
+                    println!("Mining Loop: Force triggering P2P discovery...");
+                    let _ = cmd_tx_loop.try_send(crate::p2p::P2PCommand::SyncWithNetwork);
+                }
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                discovery_ticks += 1;
             }
 
-            let _ = app_handle_loop.emit(
-                "node-status",
-                format!(
-                    "Discovering Peers... ({}/{})",
-                    discovery_ticks, max_discovery_ticks
-                ),
+            // Phase 3: Decision
+            let peers = validator_count_loop.load(Ordering::Relaxed);
+            let local_height_opt = storage_clone.get_block(0).unwrap_or(None);
+            let local_exists = local_height_opt.is_some();
+
+            println!(
+                "Mining Loop: Decision Phase - Peers: {}, LocalChainExists: {}",
+                peers, local_exists
             );
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            discovery_ticks += 1;
-        }
 
-        // Phase 3: Decision
-        let peers = validator_count_loop.load(Ordering::Relaxed);
-        let local_height_opt = storage_clone.get_block(0).unwrap_or(None);
-        let local_exists = local_height_opt.is_some();
-
-        println!(
-            "Mining Loop: Decision Phase - Peers: {}, LocalChainExists: {}",
-            peers, local_exists
-        );
-
-        if !local_exists {
-            if peers > 0 {
-                println!(
-                    "Mining Loop: Peers detected ({}) but no local chain. Attempting to sync...",
-                    peers
+            if !local_exists || peers > 0 {
+                if peers > 0 {
+                    println!(
+                    "Mining Loop: Peers detected ({}). Checking network for sync (Local: {})...",
+                    peers, local_exists
                 );
 
-                // Active Sync: Request from peers
-                let _ = app_handle_loop.emit("node-status", "Requesting Sync...");
-                // Cloned cmd_tx not needed if single use here, but checking ownership rules
-                if let Err(e) = cmd_tx_loop
-                    .send(crate::p2p::P2PCommand::SyncWithNetwork)
-                    .await
-                {
-                    println!("Mining Loop: Failed to send Sync command: {}", e);
+                    // Active Sync: Request from peers
+                    let _ = app_handle_loop.emit("node-status", "Requesting Sync...");
+                    // Cloned cmd_tx not needed if single use here, but checking ownership rules
+                    if let Err(e) = cmd_tx_loop
+                        .send(crate::p2p::P2PCommand::SyncWithNetwork)
+                        .await
+                    {
+                        println!("Mining Loop: Failed to send Sync command: {}", e);
+                    } else {
+                        println!("Mining Loop: Sync command sent.");
+                    }
+
+                    // Wait for sync with dynamic checking
+                    let max_sync_wait = 300; // 5 minutes
+                    for i in 0..max_sync_wait {
+                        if !is_running_loop.load(Ordering::Relaxed) {
+                            println!("Mining Loop: Aborted during sync wait");
+                            break 'discovery_outer;
+                        }
+
+                        let h = storage_clone.get_latest_index().unwrap_or(0);
+                        let peers = peer_count_loop.load(Ordering::Relaxed);
+
+                        // If we have a chain (Height > 0 OR Block 0 exists), we are good.
+                        // Ideally we check if we are actually receiving blocks, but for now assuming 'some chain' implies we tried.
+                        // A better check would be: if local_height < peer_height
+                        if storage_clone.get_block(0).unwrap_or(None).is_some() && i > 5 {
+                            // Give at least 5 seconds for sync to initiate?
+                            println!(
+                                "Mining Loop: Sync assumed complete/sufficient (Height {}).",
+                                h
+                            );
+                            break;
+                        }
+
+                        // Feedback to UI
+                        if i % 3 == 0 {
+                            let _ = app_handle_loop.emit(
+                                "node-status",
+                                format!("Synchronizing... ({} peers, {}s)", peers, i),
+                            );
+                            // Keep asking for sync trigger every few seconds just in case
+                            let _ = cmd_tx_loop.try_send(crate::p2p::P2PCommand::SyncWithNetwork);
+                        }
+
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+
+                // Re-check after potential sync wait
+                let local_exists_now = storage_clone.get_block(0).unwrap_or(None).is_some();
+                if !local_exists_now {
+                    // Critical Check: ONLY create genesis if we are certain we are the first/only node.
+                    // In a real network, this means we are connected to the relay, but saw 0 other validators.
+                    let current_peers = validator_count_loop.load(Ordering::Relaxed);
+
+                    if current_peers > 0 {
+                        println!("Mining Loop: Peers detected ({}) but Sync failed/incomplete. Retrying Sync loop entirely...", current_peers);
+                        let _ = app_handle_loop.emit("node-status", "Sync Retrying...");
+
+                        // Force retry by skipping the rest and going back to Peer Discovery
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue 'discovery_outer;
+                    }
+
+                    println!("Mining Loop: Connected to Relay, but no other peers found. I am the First Node.");
+                    println!("Mining Loop: Creating Genesis Block...");
+                    let _ = app_handle_loop.emit("node-status", "Creating Genesis...");
+
+                    let genesis_tx = Transaction {
+                        id: "genesis".to_string(),
+                        sender: "SYSTEM".to_string(),
+                        receiver: wallet_addr.clone(),
+                        amount: crate::chain::GENESIS_SUPPLY,
+                        shard_id: 0,
+                        timestamp: 0,
+                        signature: "genesis".to_string(),
+                    };
+                    let mut genesis_block = chain::Block::new(
+                        0,
+                        wallet_addr.clone(),
+                        vec![genesis_tx],
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                        100,                          // weight
+                        100,                          // difficulty (solo)
+                        0,                            // shard_id
+                        0,                            // Fees for genesis
+                        crate::chain::GENESIS_SUPPLY, // Genesis supply as reward
+                    );
+
+                    // VDF
+                    let vdf = CentichainVDF::new(genesis_block.vdf_difficulty);
+                    let challenge = genesis_block.calculate_hash();
+                    genesis_block.vdf_proof = vdf.solve(challenge.as_bytes());
+                    genesis_block.hash = genesis_block.calculate_hash();
+                    genesis_block.size = genesis_block.calculate_size();
+
+                    let _ = storage_clone.save_block(&genesis_block);
+                    chain_index_loop.store(0, Ordering::Relaxed);
+                    mined_by_me_count_loop.fetch_add(1, Ordering::Relaxed);
+                    let _ = app_handle_loop.emit("new-block", genesis_block);
+
+                    println!("Mining Loop: Genesis Created.");
+                    is_synced_loop.store(true, Ordering::Relaxed);
+                    let _ = app_handle_loop.emit("node-status", "Active (Genesis)");
                 } else {
-                    println!("Mining Loop: Sync command sent.");
-                }
-
-                // Wait for sync with dynamic checking
-                let max_sync_wait = 300; // 5 minutes
-                for i in 0..max_sync_wait {
-                    let h = storage_clone.get_latest_index().unwrap_or(0);
-                    let peers = peer_count_loop.load(Ordering::Relaxed);
-
-                    // If we have a chain (Height > 0 OR Block 0 exists), we are good.
-                    if storage_clone.get_block(0).unwrap_or(None).is_some() {
+                    // Local Chain Exists.
+                    // If we are Solo (peers == 0), we must mark ourselves as Synced to resume mining.
+                    if validator_count_loop.load(Ordering::Relaxed) == 0 {
                         println!(
-                            "Mining Loop: Sync successful! Genesis/Chain found (Height {}).",
-                            h
+                            "Mining Loop: Local Chain detected and NO peers. Resuming Solo Mining."
                         );
-                        break;
+                        is_synced_loop.store(true, Ordering::Relaxed);
+                        let _ = app_handle_loop.emit("node-status", "Active (Solo)");
                     }
-
-                    // Feedback to UI
-                    if i % 3 == 0 {
-                        let _ = app_handle_loop.emit(
-                            "node-status",
-                            format!("Synchronizing... ({} peers, {}s)", peers, i),
-                        );
-                        // Keep asking for sync trigger every few seconds just in case
-                        let _ = cmd_tx_loop.try_send(crate::p2p::P2PCommand::SyncWithNetwork);
-                    }
-
-                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
-
-            // Re-check after potential sync wait
-            let local_exists_now = storage_clone.get_block(0).unwrap_or(None).is_some();
-            if !local_exists_now {
-                // Critical Check: ONLY create genesis if we are certain we are the first/only node.
-                // In a real network, this means we are connected to the relay, but saw 0 other validators.
-                let current_peers = validator_count_loop.load(Ordering::Relaxed);
-
-                if current_peers > 0 {
-                    println!("Mining Loop: Peers detected ({}) but Sync failed/incomplete. Retrying Sync loop...", current_peers);
-                    let _ = app_handle_loop.emit("node-status", "Sync Retrying...");
-                    // Do NOT create Genesis. Loop back or return to retry.
-                    // For this implementation, we'll continue the loop which sleeps and retries logic if we structured it right.
-                    // But here we are outside the main loop. Let's return to force a full retry of the state.
-                    return;
-                }
-
-                println!("Mining Loop: Connected to Relay, but no other peers found. I am the First Node.");
-                println!("Mining Loop: Creating Genesis Block...");
-                let _ = app_handle_loop.emit("node-status", "Creating Genesis...");
-
-                let genesis_tx = Transaction {
-                    id: "genesis".to_string(),
-                    sender: "SYSTEM".to_string(),
-                    receiver: wallet_addr.clone(),
-                    amount: crate::chain::GENESIS_SUPPLY,
-                    shard_id: 0,
-                    timestamp: 0,
-                    signature: "genesis".to_string(),
-                };
-                let mut genesis_block = chain::Block::new(
-                    0,
-                    wallet_addr.clone(),
-                    vec![genesis_tx],
-                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-                    100,                          // weight
-                    100,                          // difficulty (solo)
-                    0,                            // shard_id
-                    0,                            // Fees for genesis
-                    crate::chain::GENESIS_SUPPLY, // Genesis supply as reward
-                );
-
-                // VDF
-                let vdf = AntigravityVDF::new(genesis_block.vdf_difficulty);
-                let challenge = genesis_block.calculate_hash();
-                genesis_block.vdf_proof = vdf.solve(challenge.as_bytes());
-                genesis_block.hash = genesis_block.calculate_hash();
-                genesis_block.size = genesis_block.calculate_size();
-
-                let _ = storage_clone.save_block(&genesis_block);
-                chain_index_loop.store(0, Ordering::Relaxed);
-                mined_by_me_count_loop.fetch_add(1, Ordering::Relaxed);
-                let _ = app_handle_loop.emit("new-block", genesis_block);
-            }
+            println!("Mining Loop: Node is now ACTIVE");
+            break; // Exit the discovery_outer loop once synced/active
         }
 
-        is_synced_loop.store(true, Ordering::Relaxed);
-        let _ = app_handle_loop.emit("node-status", "Active");
-        println!("Mining Loop: Node is now ACTIVE");
+        // -------------------------------------------------------------
+        // AHSP Phase: VDF Solver
+        // -------------------------------------------------------------
+        let consensus_clone_vdf = consensus_clone.clone();
+        let app_handle_vdf = app_handle_loop.clone();
+        let is_running_vdf = is_running_loop.clone();
+
+        let is_synced_vdf = is_synced_loop.clone();
+        let vdf_broadcaster = vdf_sender.clone(); // Clone sender for the loop
+
+        tokio::spawn(async move {
+            loop {
+                if !is_running_vdf.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+
+                // Strict Sync Check: Do not attempt PoP until we are synced with the chain tip
+                if !is_synced_vdf.load(Ordering::Relaxed) {
+                    continue;
+                }
+
+                let (my_peer_id, needs_proof, validator_count) = {
+                    let c = consensus_clone_vdf.lock().unwrap();
+                    if let Some(pid) = &c.local_peer_id {
+                        if let Some(node) = c.nodes.get(pid) {
+                            (Some(pid.clone()), !node.is_verified, c.nodes.len())
+                        } else {
+                            (None, false, 0)
+                        }
+                    } else {
+                        (None, false, 0)
+                    }
+                };
+
+                if let Some(pid) = my_peer_id {
+                    if needs_proof {
+                        // We are UNVERIFIED. Solve VDF.
+                        println!("VDF Solver: Starting VDF computation for {}...", pid);
+                        let _ = app_handle_vdf.emit("node-status", "Solving Proof of Patience...");
+
+                        let challenge = {
+                            let c = consensus_clone_vdf.lock().unwrap();
+                            c.get_vdf_challenge(&pid)
+                        };
+
+                        // Adaptive Difficulty (Memory-Hard):
+                        // Memory access is slower than SHA256.
+                        // Base: 3,000,000 iterations (~3s on DDR4)
+                        // Step: 500,000 per peer
+                        let difficulty: u64 = 3_000_000 + (validator_count as u64 * 500_000);
+                        println!(
+                            "VDF Solver: Calculated Difficulty: {} (approx {}s)",
+                            difficulty,
+                            difficulty / 1_000_000
+                        );
+
+                        let _ = app_handle_vdf.emit(
+                            "vdf-status",
+                            crate::VdfStatus {
+                                iterations_per_second: 1_000_000, // Rough estimate for UI
+                                difficulty: difficulty,
+                                is_active: true,
+                            },
+                        );
+
+                        let vdf = crate::vdf::CentichainVDF::new(difficulty);
+                        let proof = vdf.solve(challenge.as_bytes());
+
+                        println!("VDF Solver: Solved! Proof: {}", proof);
+
+                        // 1. Verify Self
+                        {
+                            let mut c = consensus_clone_vdf.lock().unwrap();
+                            c.verify_peer(pid.clone(), proof.clone());
+                        }
+
+                        // 2. Broadcast Proof to Network
+                        let msg = crate::chain::VdfProofMessage {
+                            peer_id: pid.clone(),
+                            proof: proof.clone(),
+                            challenge: challenge.clone(),
+                        };
+
+                        println!("VDF Solver: Broadcasting proof for {}", pid);
+                        if let Err(e) = vdf_broadcaster.send(msg).await {
+                            eprintln!("Failed to send VDF proof to P2P: {}", e);
+                        }
+
+                        let _ = app_handle_vdf
+                            .emit("node-status", "Patience Proven! Active Validator.");
+                        // Force verify UI
+                        let _ = app_handle_vdf.emit("vdf-solved", true);
+                    }
+                }
+            }
+        });
 
         // Phase 4: Main Loop
         let mut last_production_time = std::time::Instant::now();
@@ -637,19 +769,45 @@ async fn start_node(
             if !is_running_loop.load(Ordering::Relaxed)
                 || run_id_loop.load(Ordering::Relaxed) != my_run_id
             {
-                println!("Mining Loop: Terminating run_id {}", my_run_id);
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
 
+            // Auto-Pruning Check (Every ~5 mins)
+            let latest_height = storage_clone.get_latest_index().unwrap_or(0);
+            if latest_height > 1000 && latest_height % 300 == 0 {
+                // Keep last 1000 blocks (~30 mins for demo), 10000 for prod
+                if let Err(e) = storage_clone.prune_history(1000) {
+                    eprintln!("Pruning failed: {}", e);
+                } else {
+                    println!("Auto-Pruning triggered at height {}", latest_height);
+                }
+            }
+
             if is_synced_loop.load(Ordering::Relaxed) {
                 let (is_leader, leader_id) = {
                     let consensus = consensus_clone.lock().unwrap();
-                    let leader = consensus.select_beacon_leader();
+                    let current_slot = consensus.current_slot();
+                    let current_epoch = consensus.current_epoch();
                     let me = consensus.local_peer_id.clone();
+
+                    let my_shard = if let Some(pid) = &me {
+                        consensus.get_assigned_shard(pid, current_epoch)
+                    } else {
+                        0
+                    };
+
+                    let leader = consensus.get_shard_leader(my_shard, current_slot);
+
+                    if let (Some(l), Some(m)) = (&leader, &me) {
+                        if l == m {
+                            // valid leader
+                        }
+                    }
+
                     println!(
-                        "Mining Loop: Leader Election - Leader: {:?}, Me: {:?}",
-                        leader, me
+                        "Mining Loop: Slot {} (Epoch {}) - Shard {} Leader: {:?}, Me: {:?}",
+                        current_slot, current_epoch, my_shard, leader, me
                     );
                     (leader.is_some() && leader == me, leader)
                 };
@@ -659,8 +817,31 @@ async fn start_node(
 
                 let elapsed = last_production_time.elapsed().as_secs();
                 if mining_enabled && is_leader {
+                    // Strict Consensus Check: Did we already receive a block for this slot?
+                    let current_idx = chain_index_loop.load(Ordering::Relaxed);
+                    if let Ok(Some(latest_b)) = storage_clone.get_block(current_idx) {
+                        let latest_slot =
+                            latest_b.timestamp / crate::consensus::Consensus::SLOT_DURATION;
+                        let current_slot = {
+                            let c = consensus_clone.lock().unwrap();
+                            c.current_slot()
+                        };
+
+                        if latest_slot >= current_slot {
+                            // We already have the block for this slot (synced from valid leader).
+                            // Do NOT overwrite it with a fork.
+                            if elapsed % 5 == 0 {
+                                // Log periodically only
+                                println!("Mining Loop: Skipping production. Block for slot {} already exists.", current_slot);
+                            }
+                            // We don't sleep here, just continue loop to next iteration
+                            // But we need to ensure we don't spam.
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            continue;
+                        }
+                    }
+
                     if elapsed >= crate::chain::TARGET_BLOCK_TIME || pending.len() >= 100 {
-                        let current_idx = chain_index_loop.load(Ordering::Relaxed);
                         let is_empty = storage_clone.get_total_blocks().unwrap_or(0) == 0;
                         let target_idx = if is_empty { 0 } else { current_idx + 1 };
 
@@ -757,6 +938,7 @@ async fn start_node(
                                     receiver: tx.receiver.clone(),
                                     block_hash: "pending".to_string(),
                                     merkle_proof: vec![],
+                                    status: crate::chain::ReceiptStatus::Pending,
                                 };
 
                                 // Send to P2P for broadcasting
@@ -822,12 +1004,43 @@ async fn start_node(
                             block_reward,
                         );
 
-                        let vdf = AntigravityVDF::new(new_block.vdf_difficulty);
+                        let vdf = CentichainVDF::new(new_block.vdf_difficulty);
                         let challenge = new_block.calculate_hash();
                         let _ = app_handle_loop.emit("node-status", "Solving Proof of Patience...");
                         new_block.vdf_proof = vdf.solve(challenge.as_bytes());
                         new_block.hash = new_block.calculate_hash();
                         new_block.size = new_block.calculate_size();
+
+                        // Slashing Check vs Previous Block
+                        let prev_block_timestamp = if target_idx == 0 {
+                            0
+                        } else {
+                            storage_clone
+                                .get_block(target_idx - 1)
+                                .unwrap_or(None)
+                                .map(|b| b.timestamp)
+                                .unwrap_or(0)
+                        };
+
+                        let prev_slot =
+                            prev_block_timestamp / crate::consensus::Consensus::SLOT_DURATION;
+                        let new_block_slot =
+                            new_block.timestamp / crate::consensus::Consensus::SLOT_DURATION;
+
+                        if target_idx > 0 && new_block_slot > prev_slot + 1 {
+                            let mut c = consensus_clone.lock().unwrap();
+                            let slashed = c.slash_missed_slots(
+                                prev_slot + 1,
+                                new_block_slot - 1,
+                                my_shard_id,
+                            );
+                            if !slashed.is_empty() {
+                                println!(
+                                    "Mining Loop: SLASHED nodes for missing turns: {:?}",
+                                    slashed
+                                );
+                            }
+                        }
 
                         let _ = storage_clone.save_block(&new_block);
 
@@ -1161,6 +1374,8 @@ fn get_consensus_status(state: State<'_, AppState>) -> crate::consensus::NodeCon
                     estimated_blocks: 0,
                     patience_progress: 0.0,
                     remaining_seconds: 0,
+                    shard_id: 0,
+                    is_slot_leader: false,
                 }
             }
         },
@@ -1171,6 +1386,8 @@ fn get_consensus_status(state: State<'_, AppState>) -> crate::consensus::NodeCon
                 estimated_blocks: 0,
                 patience_progress: 0.0,
                 remaining_seconds: 0,
+                shard_id: 0,
+                is_slot_leader: false,
             }
         }
     };
@@ -1186,13 +1403,9 @@ fn exit_app() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Initialize Professional Logging
-    Logger::try_with_str("info, tauri_appantigravity_chain_lib=debug")
+    Logger::try_with_str("info, centichain_lib=debug")
         .unwrap()
-        .log_to_file(
-            FileSpec::default()
-                .directory("logs")
-                .basename("antigravity"),
-        )
+        .log_to_file(FileSpec::default().directory("logs").basename("centichain"))
         .write_mode(WriteMode::Async)
         .rotate(
             Criterion::Size(10 * 1024 * 1024), // 10MB
@@ -1204,7 +1417,7 @@ pub fn run() {
 
     // Initialize DB
     let mut db_path = std::env::temp_dir();
-    db_path.push("antigravity.db");
+    db_path.push("centichain.db");
     let storage = Storage::new(db_path.to_str().unwrap()).expect("Failed to create DB");
     let storage_arc = Arc::new(storage);
 

@@ -1,8 +1,8 @@
+use centichain_lib::consensus::Consensus;
 use std::time::Instant;
-use tauri_appantigravity_chain_lib::consensus::Consensus;
 
 fn main() {
-    println!("=== Antigravity Sharding Benchmark ===");
+    println!("=== Centichain Sharding Benchmark ===");
 
     let mut consensus = Consensus::new();
     let epoch_seed = 123456789;
