@@ -1,8 +1,8 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { AlertTriangle, Trash2, ShieldAlert } from "lucide-react";
 import { useState, useEffect } from "react";
-import { Button } from "./ui/button";
-import { cn } from "../lib/utils";
+import { Button } from "../ui/button";
+import { cn } from "../../lib/utils";
 
 interface WipeDataModalProps {
     isOpen: boolean;

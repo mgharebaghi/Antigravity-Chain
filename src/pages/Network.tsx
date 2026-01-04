@@ -1,5 +1,5 @@
 import { Badge } from "../components/ui/badge";
-import { ShieldCheck, ShieldAlert, Activity, Globe, Server, Network as NetworkIcon, Link, Wifi, Copy, Check, Cpu, Cloud } from "lucide-react";
+import { ShieldCheck, ShieldAlert, Activity, Globe, Server, Network as NetworkIcon, Link, Wifi, Copy, Check, Cpu, Cloud, RefreshCw } from "lucide-react";
 import { useEffect, useState, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/utils";
@@ -7,7 +7,8 @@ import { useApp } from "../context/AppContext";
 import { useToast } from "../context/ToastContext";
 import { listen } from "@tauri-apps/api/event";
 import NetworkMap from "../components/NetworkMap";
-
+import { Card } from "../components/ui/card";
+import { Button } from "../components/ui/button";
 interface PeerInfo {
     peer_id: string;
     trust_score: number;
@@ -19,6 +20,19 @@ interface PeerInfo {
 interface SelfNodeInfo {
     peer_id: string;
     addresses: string[];
+}
+
+interface ConsensusStateResponse {
+    node_status: {
+        state: string;
+        queue_position: number;
+        estimated_blocks: number;
+        patience_progress: number; // 0.0 to 1.0
+        remaining_seconds: number;
+        shard_id: number;
+        is_slot_leader: boolean;
+    };
+    next_leaders: [number, string | null][];
 }
 
 const getPeerColor = (peerId: string) => {
@@ -33,42 +47,73 @@ export default function Network() {
     const [selfInfo, setSelfInfo] = useState<SelfNodeInfo | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [syncInfo, setSyncInfo] = useState<{ state: string, current: number, target: number, peer: string } | null>(null);
-    const { height, relayStatus, connectedRelay } = useApp();
+    const [consensusState, setConsensusState] = useState<ConsensusStateResponse | null>(null);
+    const { height, relayStatus, connectedRelay, nodeStatus } = useApp(); // Get nodeStatus
     const { success } = useToast();
+
+    if (nodeStatus === "Relay Unreachable") {
+        return (
+            <div className="flex flex-col items-center justify-center h-full min-h-[400px] text-center p-6 glass-card rounded-2xl border-red-500/50 bg-red-500/5 mt-8">
+                <div className="p-6 bg-red-500/20 rounded-full mb-6 animate-pulse">
+                    <ShieldAlert className="w-16 h-16 text-red-500" />
+                </div>
+                <h1 className="text-3xl font-bold text-red-500 mb-4">Network Connectivity Lost</h1>
+                <p className="text-muted-foreground max-w-md mx-auto mb-8">
+                    Your node is currently isolated because no Relay Node could be found.
+                    The decentralized network bridge is unreachable. Please verify your connection settings or contact the network administrator.
+                </p>
+                <div className="flex items-center gap-4">
+                    <Button onClick={() => window.location.reload()} className="bg-red-600 hover:bg-red-700 text-white">
+                        <RefreshCw className="w-4 h-4 mr-2" /> Retry Connection
+                    </Button>
+                </div>
+            </div>
+        );
+    }
 
     useEffect(() => {
         const fetchData = async () => {
             try {
-                const [pInfo, sInfo] = await Promise.all([
+                const [pInfo, sInfo, cState] = await Promise.all([
                     invoke<PeerInfo[]>("get_network_info"),
                     invoke<SelfNodeInfo | null>("get_self_node_info"),
+                    invoke<ConsensusStateResponse>("cmd_get_consensus_state"),
                 ]);
                 setPeers(pInfo);
                 setSelfInfo(sInfo);
+                setConsensusState(cState);
             } catch (e) {
-                console.error(e);
+                console.error("Failed to fetch network data", e);
             }
         };
 
         fetchData();
-        const interval = setInterval(fetchData, 5000);
+        const interval = setInterval(fetchData, 2000);
+        return () => clearInterval(interval);
+    }, [height]);
 
-        // Listen for DHT updates
-        const unlistenPromise = listen<string[]>("dht-peers-update", (event) => {
-            setDhtPeers(event.payload);
-        });
+    useEffect(() => {
+        let unlistenDht: () => void;
+        let unlistenSync: () => void;
 
-        const unlistenSyncPromise = listen<string>("sync-status", (event) => {
-            try {
-                const data = JSON.parse(event.payload);
-                setSyncInfo(data);
-            } catch (e) { console.error("Sync status parse error", e); }
-        });
+        const setupListeners = async () => {
+            unlistenDht = await listen<string[]>("dht-peers-update", (event) => {
+                setDhtPeers(event.payload);
+            });
+
+            unlistenSync = await listen<string>("sync-status", (event) => {
+                try {
+                    const data = JSON.parse(event.payload);
+                    setSyncInfo(data);
+                } catch (e) { console.error("Sync status parse error", e); }
+            });
+        };
+
+        setupListeners();
 
         return () => {
-            clearInterval(interval);
-            unlistenPromise.then(unlisten => unlisten());
-            unlistenSyncPromise.then(unlisten => unlisten());
+            if (unlistenDht) unlistenDht();
+            if (unlistenSync) unlistenSync();
         };
     }, []);
 
@@ -87,6 +132,108 @@ export default function Network() {
         setCopiedId(id);
         success("Copied to clipboard");
         setTimeout(() => setCopiedId(null), 2000);
+    };
+
+    // Render Consensus Dashboard
+    const renderConsensusDashboard = () => {
+        if (!consensusState) return null;
+        const { node_status, next_leaders } = consensusState;
+
+        // Helper to format remaining time
+        const formatTime = (s: number) => {
+            if (s <= 0) return "Ready";
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`;
+        };
+
+        return (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8 mt-6">
+                {/* Node Status Card */}
+                <Card className="glass-card p-6 border-primary/20 bg-primary/5">
+                    <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center gap-2">
+                            <Activity className="w-5 h-5 text-emerald-400" />
+                            <h3 className="text-lg font-bold">Consensus Status</h3>
+                        </div>
+                        <Badge variant={node_status.state === "Active" || node_status.state === "Leader" ? "default" : "secondary"} className={node_status.state === "Slashed" ? "bg-red-500 hover:bg-red-600" : ""}>
+                            {node_status.state}
+                        </Badge>
+                    </div>
+
+                    <div className="space-y-4">
+                        {/* Status Progress */}
+                        {node_status.state !== "Active" && node_status.state !== "Leader" && (
+                            <div>
+                                <div className="flex justify-between text-sm mb-1">
+                                    <span className="text-muted-foreground">Lifecycle Progress</span>
+                                    <span>{Math.round(node_status.patience_progress * 100)}%</span>
+                                </div>
+                                <div className="w-full h-2 bg-secondary rounded-full overflow-hidden">
+                                    <div
+                                        className="h-full bg-emerald-500 transition-all duration-500"
+                                        style={{ width: `${node_status.patience_progress * 100}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Details Grid */}
+                        <div className="grid grid-cols-2 gap-4">
+                            <div className="bg-background/40 p-3 rounded-lg border border-white/5">
+                                <div className="text-xs text-muted-foreground">Queue Position</div>
+                                <div className="text-xl font-mono">{node_status.queue_position}</div>
+                            </div>
+                            <div className="bg-background/40 p-3 rounded-lg border border-white/5">
+                                <div className="text-xs text-muted-foreground">Remaining Wait</div>
+                                <div className="text-xl font-mono text-xs mt-1">{formatTime(node_status.remaining_seconds)}</div>
+                            </div>
+                            <div className="bg-background/40 p-3 rounded-lg border border-white/5">
+                                <div className="text-xs text-muted-foreground">Shard ID</div>
+                                <div className="text-xl font-mono">#{node_status.shard_id}</div>
+                            </div>
+                            <div className="bg-background/40 p-3 rounded-lg border border-white/5">
+                                <div className="text-xs text-muted-foreground">Is Leader?</div>
+                                <div className={cn("text-xl font-bold", node_status.is_slot_leader ? "text-emerald-400" : "text-muted-foreground")}>
+                                    {node_status.is_slot_leader ? "YES" : "NO"}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </Card>
+
+                {/* Future Leaders Schedule */}
+                <Card className="glass-card p-6 border-primary/20 bg-primary/5">
+                    <div className="flex items-center gap-2 mb-4">
+                        <div className="w-5 h-5 text-blue-400"><Cpu /></div>
+                        <h3 className="text-lg font-bold">Leader Schedule (Next 10 Blocks)</h3>
+                    </div>
+                    <div className="space-y-2 max-h-[200px] overflow-y-auto pr-2 custom-scrollbar">
+                        {next_leaders && next_leaders.length > 0 ? (
+                            next_leaders.map(([slot, leaderId]) => (
+                                <div key={slot} className="flex items-center justify-between p-2 rounded bg-background/30 border border-white/5 text-sm">
+                                    <div className="flex items-center gap-3">
+                                        <span className="font-mono text-emerald-500/80">Slot #{slot}</span>
+                                        {leaderId ? (
+                                            <span className="font-mono text-xs">{leaderId.slice(0, 8)}...{leaderId.slice(-6)}</span>
+                                        ) : (
+                                            <span className="text-xs text-muted-foreground italic">Pending...</span>
+                                        )}
+                                    </div>
+                                    {leaderId && selfInfo && leaderId === selfInfo.peer_id && (
+                                        <Badge className="bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 text-[10px]">YOU</Badge>
+                                    )}
+                                </div>
+                            ))
+                        ) : (
+                            <div className="text-center text-muted-foreground py-8">
+                                No leader schedule available.
+                            </div>
+                        )}
+                    </div>
+                </Card>
+            </div>
+        );
     };
 
     return (
@@ -115,6 +262,9 @@ export default function Network() {
             <div className="w-full">
                 <NetworkMap />
             </div>
+
+            {/* Consensus Dashboard */}
+            {renderConsensusDashboard()}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
@@ -309,7 +459,6 @@ export default function Network() {
                         )}
                     </div>
                 </div>
-
             </div>
         </div>
     );

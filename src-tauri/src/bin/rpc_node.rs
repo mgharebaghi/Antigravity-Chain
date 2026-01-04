@@ -10,9 +10,9 @@ use axum::{
 };
 use centichain_lib::{
     chain::{Block, SyncRequest, SyncResponse, Transaction},
+    consensus::mempool::Mempool,
     consensus::Consensus,
-    mempool::Mempool,
-    p2p::message_id_fn,
+    network::p2p::message_id_fn,
     storage::Storage,
 };
 use libp2p::{
@@ -312,6 +312,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     SyncRequest::GetMempool => {
                                         let txs = p2p_mempool.get_pending_transactions();
                                         let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Mempool(txs));
+                                    },
+                                    SyncRequest::GetHeaders(start, end) => {
+                                        let mut headers = Vec::new();
+                                        for i in start..=end {
+                                            if let Ok(Some(b)) = p2p_storage.get_block(i) {
+                                                headers.push(centichain_lib::chain::Header::from_block(&b));
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::HeadersBatch(headers));
                                     }
                                 }
                             },
@@ -338,6 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     },
                                     SyncResponse::Mempool(_m) => {},
+                                    SyncResponse::HeadersBatch(_) => {},
                                 }
                             },
                         }
@@ -481,12 +493,12 @@ async fn get_network_stats(State(state): State<Arc<AppState>>) -> Json<NetworkSt
     let reward = centichain_lib::chain::calculate_mining_reward(height + 1);
 
     // Calculate simple halving info
-    let current_interval = height / centichain_lib::chain::HALVING_INTERVAL;
-    let next_halving = (current_interval + 1) * centichain_lib::chain::HALVING_INTERVAL;
+    let current_interval = height / centichain_lib::utils::constants::HALVING_INTERVAL;
+    let next_halving = (current_interval + 1) * centichain_lib::utils::constants::HALVING_INTERVAL;
 
     Json(NetworkStats {
         supply,
-        max_supply: centichain_lib::chain::TOTAL_SUPPLY,
+        max_supply: centichain_lib::utils::constants::TOTAL_SUPPLY,
         circulating: supply, // Simplifying for now
         halving_block: next_halving,
         current_reward: reward,

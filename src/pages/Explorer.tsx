@@ -16,8 +16,8 @@ import {
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 // import { cn } from "../lib/utils";
-import BlockDetailsModal from '../components/BlockDetailsModal';
-import TxDetailsModal from '../components/TxDetailsModal';
+import BlockDetailsModal from '../components/modals/BlockDetailsModal';
+import TxDetailsModal from '../components/modals/TxDetailsModal';
 
 const PAGE_SIZE = 10;
 

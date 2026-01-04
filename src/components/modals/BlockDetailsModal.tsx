@@ -1,9 +1,9 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { Box, X, Clock, Activity, Layers, ShieldCheck, Copy, Check, User, ArrowRight, Hash } from "lucide-react";
-import { Block, Transaction } from "../context/AppContext";
-import { formatNumber } from "../utils/format";
-import { Badge } from "./ui/badge";
-import { Button } from "./ui/button";
+import { Block, Transaction } from "../../context/AppContext";
+import { formatNumber } from "../../utils/format";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 import { useState } from "react";
 import { format } from "date-fns";
 

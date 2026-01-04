@@ -6,7 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { useToast } from "../context/ToastContext";
 import { useState } from "react";
 import { formatNumber, ONE_AGT } from "../utils/format";
-import SwitchWalletModal from "../components/SwitchWalletModal";
+import SwitchWalletModal from "../components/modals/SwitchWalletModal";
 import { Badge } from "../components/ui/badge";
 
 export default function Wallet() {

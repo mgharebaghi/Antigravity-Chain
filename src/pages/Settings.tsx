@@ -16,7 +16,7 @@ import {
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "../context/ToastContext";
-import WipeDataModal from "../components/WipeDataModal";
+import WipeDataModal from "../components/modals/WipeDataModal";
 import { cn } from "../lib/utils";
 // import { useTheme } from '../context/ThemeContext';
 

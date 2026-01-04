@@ -115,7 +115,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const [vdfStatus, setVdfStatus] = useState<VdfStatus | null>(null);
     const [selfNodeInfo, setSelfNodeInfo] = useState<SelfNodeInfo | null>(null);
     const [consensusStatus, setConsensusStatus] = useState<NodeConsensusStatus | null>(null);
-    const { success, info } = useToast();
+    const { success, info, error } = useToast();
 
     // Initial load
     useEffect(() => {
@@ -142,6 +142,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 setConnectedRelay(null);
             }
         });
+
+        const unlistenNodeError = listen('node-error', (event: any) => {
+            console.error("Node Error Event:", event.payload);
+            error(event.payload);
+            if (event.payload.includes("Relay Unreachable")) {
+                setNodeStatus("Relay Unreachable");
+            } else {
+                setNodeStatus("Stopped");
+            }
+            setRelayStatus("Disconnected");
+        });
+
 
         const unlistenRelayInfo = listen('relay-info', (event: any) => {
             console.log("Relay Info Event:", event.payload);
@@ -180,6 +192,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return () => {
             unlistenNode.then(f => f());
             unlistenRelay.then(f => f());
+            unlistenNodeError.then(f => f());
             unlistenRelayInfo.then(f => f());
             unlistenPeerCount.then(f => f());
             unlistenNewBlock.then(f => f());

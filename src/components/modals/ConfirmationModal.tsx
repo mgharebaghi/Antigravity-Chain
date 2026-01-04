@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { AlertTriangle, X } from 'lucide-react';
-import { Button } from './ui/button';
-import { cn } from '../lib/utils';
+import { Button } from '../ui/button';
+import { cn } from '../../lib/utils';
 import { useEffect } from 'react';
 
 interface ConfirmationModalProps {

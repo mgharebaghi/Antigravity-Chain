@@ -44,7 +44,10 @@ impl NodeState {
 }
 
 // Use current crate context
-use crate::vdf::CentichainVDF;
+pub mod mempool;
+pub mod vdf;
+
+use self::vdf::CentichainVDF;
 
 pub struct Consensus {
     pub nodes: HashMap<String, NodeState>,
@@ -273,6 +276,20 @@ impl Consensus {
             }
         }
         slashed_nodes
+    }
+
+    pub fn get_future_leaders(
+        &self,
+        start_slot: u64,
+        count: u64,
+        shard_id: u16,
+    ) -> Vec<(u64, Option<String>)> {
+        let mut leaders = Vec::new();
+        for i in 0..count {
+            let slot = start_slot + i;
+            leaders.push((slot, self.get_shard_leader(shard_id, slot)));
+        }
+        leaders
     }
 
     pub fn get_node_status(&self, peer_id: &String) -> NodeConsensusStatus {

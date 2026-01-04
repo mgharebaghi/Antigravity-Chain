@@ -1,6 +1,6 @@
 import { HashRouter, Routes, Route, useLocation } from "react-router-dom";
 import { AnimatePresence } from "framer-motion";
-import Dashboard from "./components/Dashboard";
+import NetworkDashboard from "./pages/NetworkDashboard";
 import Wallet from "./pages/Wallet";
 import Network from "./pages/Network";
 import Transactions from "./pages/Transactions";
@@ -21,7 +21,7 @@ function AnimatedRoutes() {
   return (
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
-        <Route path="/" element={<Dashboard />} />
+        <Route path="/" element={<NetworkDashboard />} />
         <Route path="/wallet" element={<Wallet />} />
         <Route path="/network" element={<Network />} />
         <Route path="/tokenomics" element={<Tokenomics />} />

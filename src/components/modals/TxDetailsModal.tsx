@@ -1,9 +1,9 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Clock, ArrowUpRight, CheckCircle2, Copy, Check, Info, User } from "lucide-react";
-import { Transaction } from "../context/AppContext";
+import { Transaction } from "../../context/AppContext";
 import { formatDistanceToNow } from "date-fns";
-import { formatNumber, calculateFee } from "../utils/format";
-import { Button } from "./ui/button";
+import { formatNumber, calculateFee } from "../../utils/format";
+import { Button } from "../ui/button";
 import { useState } from "react";
 
 interface TxDetailsModalProps {

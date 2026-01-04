@@ -138,4 +138,12 @@ impl Mempool {
         let pool = self.pending_txs.lock().unwrap();
         pool.len()
     }
+
+    pub fn clear(&self) {
+        let mut pool = self.pending_txs.lock().unwrap();
+        pool.clear();
+        if let Err(e) = self.storage.remove_all_pending_txs() {
+            log::warn!("Failed to clear pending txs from storage: {}", e);
+        }
+    }
 }

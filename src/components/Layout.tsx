@@ -22,14 +22,17 @@ import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 import { NavLink, useLocation } from 'react-router-dom';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import ConfirmationModal from './ConfirmationModal';
+import ConfirmationModal from './modals/ConfirmationModal';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
     const { theme, setTheme } = useTheme();
-    const { exitApp } = useApp();
+    const { exitApp, nodeStatus } = useApp(); // Get nodeStatus
     const [sidebarOpen, setSidebarOpen] = useState(false);
     const [showExitModal, setShowExitModal] = useState(false);
     const location = useLocation();
+
+    // Critical Error State
+    const isCriticalError = nodeStatus === "Relay Unreachable";
 
     // Handle Window Close Request
     useEffect(() => {
@@ -65,7 +68,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     const currentRouteName = navItems.find(item => item.path === location.pathname)?.name || "Dashboard";
 
     return (
-        <div className="flex h-screen w-full bg-background text-foreground font-sans overflow-hidden selection:bg-primary/20 selection:text-primary">
+        <div className={cn(
+            "flex h-screen w-full bg-background text-foreground font-sans overflow-hidden selection:bg-primary/20 selection:text-primary transition-colors duration-500",
+            isCriticalError && "border-[8px] border-red-600 bg-red-950/10",
+        )}>
 
             {/* Desktop Sidebar - Glassmorphism */}
             <aside className="hidden md:flex w-72 flex-col border-r border-border/50 bg-card/30 backdrop-blur-xl relative z-20">
@@ -133,6 +139,22 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
             {/* Main Content Area */}
             <main className="flex-1 flex flex-col min-w-0 bg-background/50 backdrop-blur-[2px] relative">
+
+                {/* Critical Error Banner */}
+                <AnimatePresence>
+                    {isCriticalError && (
+                        <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="bg-red-600 text-white px-6 py-2 flex items-center justify-center gap-3 font-bold text-sm shadow-xl z-50"
+                        >
+                            <Activity className="h-4 w-4 animate-pulse" />
+                            CRITICAL NETWORK ERROR: Relay Node Unreachable. Please check your internet connection or relay status.
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 {/* Header */}
                 <header className="h-20 border-b border-border/50 bg-background/60 backdrop-blur-xl flex items-center justify-between px-6 sticky top-0 z-30 transition-all duration-300">
                     <div className="flex items-center gap-4">

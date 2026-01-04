@@ -382,4 +382,23 @@ impl Storage {
         write_txn.commit()?;
         Ok(count)
     }
+    pub fn start_new_run(&self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    pub fn remove_all_pending_txs(&self) -> Result<(), anyhow::Error> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(MEMPOOL_TABLE)?;
+            let keys: Vec<String> = table
+                .iter()?
+                .map(|i| i.unwrap().0.value().to_string())
+                .collect();
+            for k in keys {
+                table.remove(k.as_str())?;
+            }
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
 }

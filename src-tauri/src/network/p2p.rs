@@ -37,8 +37,8 @@ const SYNC_PROTOCOL: &str = "/centichain/sync/1.0.0";
 use tauri::{AppHandle, Emitter};
 
 use crate::chain::{Block, SyncRequest, SyncResponse, Transaction};
+use crate::consensus::mempool::Mempool;
 use crate::consensus::Consensus;
-use crate::mempool::Mempool;
 use crate::storage::Storage;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -60,13 +60,14 @@ pub async fn start_p2p_node(
     peer_count: Arc<AtomicUsize>,
     validator_count: Arc<AtomicUsize>,
     chain_index: Arc<std::sync::atomic::AtomicU64>,
-    relay_addr: String,
+    relay_addrs: Vec<String>,
     my_run_id: u64,
     mut block_receiver: tokio::sync::mpsc::Receiver<Box<crate::chain::Block>>,
     mut tx_receiver: tokio::sync::mpsc::Receiver<crate::chain::Transaction>,
     mut receipt_receiver: tokio::sync::mpsc::Receiver<crate::chain::Receipt>,
     mut vdf_receiver: tokio::sync::mpsc::Receiver<crate::chain::VdfProofMessage>, // New Arg
     node_type: Arc<Mutex<crate::NodeType>>,
+    relay_connected: Arc<AtomicBool>,
     wallet_keypair: Option<identity::Keypair>,
     mut cmd_rx: tokio::sync::mpsc::Receiver<P2PCommand>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -187,8 +188,56 @@ pub async fn start_p2p_node(
     // Listen on all interfaces
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // Attempt to dial the configured relay
-    let relay_addr_parsed: libp2p::Multiaddr = relay_addr.parse()?;
+    // Attempt to dial and listen on ALL configured relays
+    let mut relay_connected_count = 0;
+    let mut relay_peer_id_opt = None; // Store the first relay peer id found
+
+    for relay_str in &relay_addrs {
+        if let Ok(relay_addr_parsed) = relay_str.parse::<libp2p::Multiaddr>() {
+            match swarm.dial(relay_addr_parsed.clone()) {
+                Ok(_) => {
+                    log::info!("Dialing relay: {}", relay_addr_parsed);
+                    // Reservation: This allows other nodes to reach us via the relay
+                    if let Err(e) =
+                        swarm.listen_on(relay_addr_parsed.clone().with(Protocol::P2pCircuit))
+                    {
+                        log::error!("Failed to listen on relay circuit {}: {}", relay_str, e);
+                    } else {
+                        log::info!(
+                            "Listening on relay circuit {} for incoming P2P connections.",
+                            relay_str
+                        );
+                        // Announce our relayed address
+                        let external_addr = relay_addr_parsed
+                            .clone()
+                            .with(Protocol::P2pCircuit)
+                            .with(Protocol::P2p(local_peer_id));
+                        log::info!("Announcing external address: {}", external_addr);
+                        swarm.add_external_address(external_addr);
+                        relay_connected_count += 1;
+
+                        // Capture the first valid relay peer ID for consensus logic exclusion
+                        if relay_peer_id_opt.is_none() {
+                            relay_peer_id_opt = relay_addr_parsed.iter().find_map(|p| match p {
+                                Protocol::P2p(id) => Some(id),
+                                _ => None,
+                            });
+
+                            if let Some(rid) = relay_peer_id_opt {
+                                log::info!("P2P Init: Relay PeerID identified: {}", rid);
+                                consensus.lock().unwrap().nodes.remove(&rid.to_string());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to dial relay {}: {}", relay_str, e);
+                }
+            }
+        } else {
+            log::error!("Invalid relay address: {}", relay_str);
+        }
+    }
 
     // Bootnodes (Placeholder)
     let bootnodes: Vec<&str> = vec![];
@@ -213,45 +262,40 @@ pub async fn start_p2p_node(
         );
     }
 
-    match swarm.dial(relay_addr_parsed.clone()) {
-        Ok(_) => {
-            log::info!("Dialing relay: {}", relay_addr_parsed);
-            // Reservation: This allows other nodes to reach us via the relay
-            if let Err(e) = swarm.listen_on(relay_addr_parsed.clone().with(Protocol::P2pCircuit)) {
-                log::error!("Failed to listen on relay circuit: {}", e);
-            } else {
-                log::info!("Listening on relay circuit for incoming P2P connections.");
-                // CRITICAL: Announce our relayed address as an EXTERNAL address
-                // so the Relay can tell others how to reach us.
-                let external_addr = relay_addr_parsed
-                    .clone()
-                    .with(Protocol::P2pCircuit)
-                    .with(Protocol::P2p(local_peer_id));
-                log::info!("Announcing external address: {}", external_addr);
-                swarm.add_external_address(external_addr);
-            }
-
-            // Relay is connected, but we do NOT add it to Kademlia DHT.
-            // User Requirement: "Leader (Relay) should not be in DHT".
-            // We rely on Identify/Mdns/Gossip for finding REAL peers.
-        }
-        Err(e) => {
-            log::error!("Failed to dial relay: {}", e);
-            let _ = app_handle.emit("relay-status", "disconnected");
+    if relay_connected_count == 0 {
+        let _ = app_handle.emit("relay-status", "disconnected");
+        log::warn!("Warning: Failed to connect to any relay. Operating in restricted mode.");
+    } else {
+        let _ = app_handle.emit(
+            "relay-status",
+            format!("Connected ({} relays)", relay_connected_count),
+        );
+        relay_connected.store(true, Ordering::Relaxed);
+        if let Some(rid) = relay_peer_id_opt {
+            consensus.lock().unwrap().nodes.remove(&rid.to_string());
         }
     }
 
-    let _ = app_handle.emit("relay-status", "Connecting...");
     let _ = app_handle.emit("node-status", "Connecting");
-
-    let mut relay_peer_id_opt = relay_addr_parsed.iter().find_map(|p| match p {
-        Protocol::P2p(id) => Some(id),
-        _ => None,
-    });
 
     // [NEW] Network Graph State: PeerId -> Vec<PeerId> (Neighbors)
     let mut network_graph: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
+
+    // [NEW] Startup State Machine
+    #[derive(PartialEq)]
+    enum NodeStartupState {
+        ConnectingToRelay { start_time: std::time::Instant },
+        DiscoveringPeers { start_time: std::time::Instant },
+        Running,
+        RelayConnectionFailed,
+    }
+
+    let mut startup_state = NodeStartupState::ConnectingToRelay {
+        start_time: std::time::Instant::now(),
+    };
+    let discovery_duration = Duration::from_secs(5); // Wait 5s for peers
+    let relay_timeout_duration = Duration::from_secs(15); // Fail if no relay in 15s
 
     // Event Loop
     let mut check_interval = tokio::time::interval(Duration::from_secs(1));
@@ -262,7 +306,48 @@ pub async fn start_p2p_node(
         if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
             log::info!("P2P Node stopping...");
             let _ = app_handle.emit("relay-status", "Disconnected");
+            relay_connected.store(false, Ordering::Relaxed);
             break;
+        }
+
+        // STARTUP LOGIC
+        match startup_state {
+            NodeStartupState::ConnectingToRelay { start_time } => {
+                if relay_connected.load(Ordering::Relaxed) {
+                    log::info!("Startup: Relay Connected. Switching to Discovery Phase.");
+                    let _ = app_handle.emit("node-status", "Searching for Network...");
+                    startup_state = NodeStartupState::DiscoveringPeers {
+                        start_time: std::time::Instant::now(),
+                    };
+
+                    // Trigger immediate discovery
+                    let _ = swarm.behaviour_mut().kad.bootstrap();
+                    if let Some(rid) = relay_peer_id_opt {
+                        let _ = swarm.behaviour_mut().kad.get_closest_peers(rid);
+                    }
+                } else if start_time.elapsed() >= relay_timeout_duration {
+                    log::error!("Startup: Relay Connection Timed Out!");
+                    let _ = app_handle.emit("node-status", "Error: Relay Not Found");
+                    let _ = app_handle.emit("relay-status", "Connection Failed");
+                    startup_state = NodeStartupState::RelayConnectionFailed;
+                } else {
+                    let _ = app_handle.emit("node-status", "Connecting to Relay...");
+                }
+            }
+            NodeStartupState::RelayConnectionFailed => {
+                let _ = app_handle.emit("node-status", "Error: Relay Not Found");
+                let _ = app_handle.emit("relay-status", "Connection Failed");
+            }
+            NodeStartupState::DiscoveringPeers { start_time } => {
+                let _ = app_handle.emit("node-status", "Searching for Network...");
+                if start_time.elapsed() >= discovery_duration {
+                    log::info!("Startup: Discovery Phase Complete. Entering Normal Operation.");
+                    startup_state = NodeStartupState::Running;
+                }
+            }
+            NodeStartupState::Running => {
+                // Normal Logic
+            }
         }
 
         tokio::select! {
@@ -306,7 +391,7 @@ pub async fn start_p2p_node(
                  }
                  let _ = app_handle.emit("dht-peers-update", dht_peers);
 
-                 if !is_synced.load(Ordering::Relaxed) {
+                 if startup_state == NodeStartupState::Running && !is_synced.load(Ordering::Relaxed) {
                      // 1. Re-query DHT to find new peers - SEARCH FOR SELF to find nodes near us
                      log::info!("P2P Loop: Expanding discovery. Searching DHT for neighbors...");
 
@@ -379,13 +464,26 @@ pub async fn start_p2p_node(
                  peer_count.store(valid_peers, Ordering::Relaxed);
                  let _ = app_handle.emit("peer-count", valid_peers);
 
-                 // CHECK: First Node Logic
-                 // If we have 0 valid peers (active validators), we are the First Node.
-                 // We should assume we are Synced and ready to Mine immediately.
-                 if valid_peers == 0 && !is_synced.load(Ordering::Relaxed) {
-                     log::info!("No peers detected. Assuming Role: FIRST NODE (Genesis). State -> Synced.");
-                     is_synced.store(true, Ordering::Relaxed);
-                     let _ = app_handle.emit("node-status", "Active (First Node)");
+                 match startup_state {
+                    NodeStartupState::ConnectingToRelay { .. } => {
+                         let _ = app_handle.emit("node-status", "Connecting to Relay...");
+                    },
+                    NodeStartupState::RelayConnectionFailed => {
+                         let _ = app_handle.emit("node-status", "Error: Relay Not Found");
+                    },
+                    NodeStartupState::DiscoveringPeers { .. } => {
+                         let _ = app_handle.emit("node-status", "Searching for Network...");
+                    },
+                    NodeStartupState::Running => {
+                         // CHECK: First Node Logic
+                         // If we have 0 valid peers (active validators), we are the First Node.
+                         // We should assume we are Synced and ready to Mine immediately.
+                         if valid_peers == 0 && !is_synced.load(Ordering::Relaxed) {
+                             log::info!("No peers detected. Assuming Role: FIRST NODE (Genesis). State -> Synced.");
+                             is_synced.store(true, Ordering::Relaxed);
+                             let _ = app_handle.emit("node-status", "Active (First Node)");
+                         }
+                    }
                  }
 
                  let v_count = {
@@ -436,52 +534,25 @@ pub async fn start_p2p_node(
                 SwarmEvent::Behaviour(CentichainBehaviourEvent::Identify(libp2p::identify::Event::Received {
                     peer_id,
                     info,
-                    ..
                 })) => {
-                    log::info!("Identified peer {:?} with version {:?}", peer_id, info.protocol_version);
+                    log::info!("Identify: Connected to {} ({:?})", peer_id, info.agent_version);
 
-                    // CRITICAL: Populate Kademlia DHT with the addresses we just learned.
-                    // BUT ONLY IF IT IS NOT THE RELAY (Leader)
-                    // Check if this peer matches our known relay peer ID
-                    let is_relay = Some(peer_id) == relay_peer_id_opt
-                        || info.listen_addrs.iter().any(|a| a.to_string().contains(&relay_addr));
+                    // Add to DHT if useful
+                    for addr in &info.listen_addrs {
+                        let is_relay_addr = relay_addrs.iter().any(|r| addr.to_string().contains(r));
+                        if !is_relay_addr {
+                            swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                        }
+                    }
 
-                    if !is_relay {
-                         for addr in &info.listen_addrs {
-                             swarm.behaviour_mut().kad.add_address(&peer_id, addr.clone());
+                    // Fallback detection (simplified)
+                    if relay_peer_id_opt.is_none() {
+                         // If any address matches our relay config, assume it is relay
+                         if info.listen_addrs.iter().any(|a| relay_addrs.iter().any(|r| a.to_string().contains(r))) {
+                              log::info!("Relay Identified via address match: {}", peer_id);
+                              relay_peer_id_opt = Some(peer_id);
+                              let _ = app_handle.emit("relay-info", peer_id.to_string());
                          }
-                    } else {
-                        log::info!("Ignored Relay for DHT: {:?}", peer_id);
-                    }
-
-                    // Fallback Relay Detection
-                    if relay_peer_id_opt.is_none() && info.listen_addrs.iter().any(|a| a.to_string().contains(&relay_addr)) {
-                         log::info!("Relay Identified via listen address match: {}", peer_id);
-                         relay_peer_id_opt = Some(peer_id);
-                    }
-
-                    // If this is the RELAY (detected now or before)
-                    if Some(peer_id) == relay_peer_id_opt {
-                             log::info!("P2P: Relay identified ({:?}). Bootstrapping DHT...", peer_id);
-                             if let Err(e) = swarm.behaviour_mut().kad.bootstrap() {
-                                 log::error!("Kademlia bootstrap error: {:?}", e);
-                             }
-                             // Safety: Ensure relay is removed from consensus
-                             consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
-                    }
-
-                    // PROACTIVE: If we aren't synced, ask this peer for their height immediately.
-                    if !is_synced.load(Ordering::Relaxed) && Some(peer_id) != relay_peer_id_opt {
-                         log::info!("P2P Sync: Identified NEW validator {}. Requesting height...", peer_id);
-                         swarm.behaviour_mut().sync.send_request(&peer_id, SyncRequest::GetHeight);
-                    }
-
-                    // Only add to consensus if it is NOT the relay
-                    if Some(peer_id) != relay_peer_id_opt {
-                        let mut c = consensus.lock().unwrap();
-                        let pid_str = peer_id.to_string();
-                        let node = c.nodes.entry(pid_str.clone()).or_insert_with(|| crate::consensus::NodeState::new(pid_str));
-                        node.addresses = info.listen_addrs.iter().map(|a| a.to_string()).collect();
                     }
                 }
 
@@ -578,6 +649,17 @@ pub async fn start_p2p_node(
                                 let txs = mempool.get_pending_transactions();
                                 let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::Mempool(txs));
                             }
+                            SyncRequest::GetHeaders(start, end) => {
+                                let mut headers = Vec::new();
+                                for i in start..=end {
+                                    if let Ok(Some(b)) = storage.get_block(i) {
+                                        headers.push(crate::chain::Header::from_block(&b));
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let _ = swarm.behaviour_mut().sync.send_response(channel, SyncResponse::HeadersBatch(headers));
+                            }
                         }
                     }
                     libp2p::request_response::Message::Response { response, .. } => {
@@ -668,80 +750,85 @@ pub async fn start_p2p_node(
                     }
                 },
 
+                // (Duplicate Identify handler removed)
+
                 SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                    let remote_addr = endpoint.get_remote_address().to_string();
-
-                    // Allow broad match for relay (configured addr vs detected addr)
-                    if endpoint.is_dialer() && remote_addr.contains(&relay_addr) {
-                        log::info!("Relay connection established with {}. (Address Match)", peer_id);
-                        relay_peer_id_opt = Some(peer_id); // Capture the Relay Peer ID
-
-                        let _ = app_handle.emit("relay-status", "connected");
-                        let _ = app_handle.emit("relay-info", peer_id.to_string());
-                        consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
+                    if endpoint.is_dialer() {
+                        let remote_addr = endpoint.get_remote_address().to_string();
+                        if relay_addrs.iter().any(|r| remote_addr.contains(r)) {
+                            log::info!("Connection established with Relay: {}", peer_id);
+                            relay_peer_id_opt = Some(peer_id);
+                            let _ = app_handle.emit("relay-status", "connected");
+                            let _ = app_handle.emit("relay-info", peer_id.to_string());
+                            relay_connected.store(true, Ordering::Relaxed);
+                            consensus.lock().unwrap().nodes.remove(&peer_id.to_string());
+                        } else {
+                            log::info!("Connection established with Peer: {}", peer_id);
+                            consensus.lock().unwrap().register_node(peer_id.to_string());
+                        }
                     } else {
-                        consensus.lock().unwrap().register_node(peer_id.to_string());
+                         consensus.lock().unwrap().register_node(peer_id.to_string());
                     }
+
                     // Update peer count (excluding relay)
                     let total_peers = swarm.network_info().num_peers();
                     let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
                     let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
                     peer_count.store(valid_peers, Ordering::Relaxed);
-                }
+                },
 
                 SwarmEvent::ConnectionClosed { peer_id, endpoint, .. } => {
-                    let remote_addr = endpoint.get_remote_address().to_string();
-                    if remote_addr.contains(&relay_addr) {
-                        log::warn!("Relay connection closed: {}", peer_id);
-                        let _ = app_handle.emit("relay-status", "disconnected");
-                    }
+                     let remote_addr = endpoint.get_remote_address().to_string();
+                     if relay_addrs.iter().any(|r| remote_addr.contains(r)) {
+                         log::warn!("Relay connection closed: {}", peer_id);
+                         let _ = app_handle.emit("relay-status", "disconnected");
+                         relay_connected.store(false, Ordering::Relaxed);
+                     }
+
                     // Update peer count (excluding relay)
                     let total_peers = swarm.network_info().num_peers();
                     let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
                     let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
                     peer_count.store(valid_peers, Ordering::Relaxed);
-                }
+                },
 
                 SwarmEvent::Behaviour(CentichainBehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { .. })) => {
                     log::info!("Relay reservation accepted! Visible to network.");
-                    let _ = app_handle.emit("relay-status", "connected");
-                }
+                    let _ = app_handle.emit("relay-status", "active");
+                },
+
                 SwarmEvent::Behaviour(CentichainBehaviourEvent::RelayClient(relay::client::Event::ReservationReqFailed { error, .. })) => {
                     log::error!("Relay reservation failed: {:?}", error);
                     let _ = app_handle.emit("relay-status", "reservation-failed");
-                }
+                },
+
                 SwarmEvent::Behaviour(CentichainBehaviourEvent::Kad(kad::Event::OutboundQueryProgressed { result, .. })) => {
-                    match result {
+                     match result {
                         kad::QueryResult::GetClosestPeers(Ok(ok)) => {
                             for peer in ok.peers {
-                                log::info!("Kademlia: Discovered neighbor {} via Query", peer);
                                 if Some(peer) != relay_peer_id_opt && !swarm.is_connected(&peer) {
-                                    log::info!("P2P: Actively dialing neighbor {}", peer);
                                     let _ = swarm.dial(peer);
                                 }
                             }
                         }
                         _ => {}
                     }
-                }
+                },
+
                 SwarmEvent::Behaviour(CentichainBehaviourEvent::Kad(kad::Event::RoutingUpdated { peer, .. })) => {
-                     if Some(peer) != relay_peer_id_opt {
-                         log::info!("Kademlia: Routing Table updated with peer {}", peer);
-                         if !swarm.is_connected(&peer) {
-                             log::info!("P2P: Dialing discovered peer {}", peer);
-                             log::info!("P2P: Dialing discovered peer {}", peer);
-                             let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
+                      if Some(peer) != relay_peer_id_opt && !swarm.is_connected(&peer) {
+                            let dial_opts = libp2p::swarm::dial_opts::DialOpts::peer_id(peer)
                                 .condition(libp2p::swarm::dial_opts::PeerCondition::Disconnected)
                                 .build();
-                             let _ = swarm.dial(dial_opts);
-                         }
-                     }
-                     // Update peer count (excluding relay)
-                     let total_peers = swarm.network_info().num_peers();
-                     let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
-                     let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
-                     peer_count.store(valid_peers, Ordering::Relaxed);
-                }
+                            let _ = swarm.dial(dial_opts);
+                      }
+
+                      let total_peers = swarm.network_info().num_peers();
+                      let relay_is_conn = if let Some(rid) = relay_peer_id_opt { swarm.is_connected(&rid) } else { false };
+                      let valid_peers = if relay_is_conn { total_peers.saturating_sub(1) } else { total_peers };
+                      peer_count.store(valid_peers, Ordering::Relaxed);
+                },
+
                 _ => {}
             }
         }

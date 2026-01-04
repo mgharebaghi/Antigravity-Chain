@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { LogOut, UserCircle, ArrowRightLeft } from "lucide-react";
-import { Button } from "./ui/button";
+import { Button } from "../ui/button";
 
 interface SwitchWalletModalProps {
     isOpen: boolean;
