@@ -476,13 +476,15 @@ pub async fn start_p2p_node(
                     },
                     NodeStartupState::Running => {
                          // CHECK: First Node Logic
-                         // If we have 0 valid peers (active validators), we are the First Node.
-                         // We should assume we are Synced and ready to Mine immediately.
+                         // DEFERRED TO MINING LOOP: We do not assume Genesis here.
+                         // Mining loop waits 60s then decides.
+                         /*
                          if valid_peers == 0 && !is_synced.load(Ordering::Relaxed) {
                              log::info!("No peers detected. Assuming Role: FIRST NODE (Genesis). State -> Synced.");
                              is_synced.store(true, Ordering::Relaxed);
                              let _ = app_handle.emit("node-status", "Active (First Node)");
                          }
+                         */
                     }
                  }
 
@@ -582,6 +584,7 @@ pub async fn start_p2p_node(
                          if let Ok(block) = serde_json::from_slice::<Block>(&message.data) {
                                log::info!("Received Gossip Block #{} from {}", block.index, peer_id);
                                if let Ok(_) = storage.save_block(&block) {
+                                   consensus.lock().unwrap().mark_peer_active(block.author.clone()); // [NEW] Implicitly activate valid authors
                                    chain_index.store(block.index, Ordering::Relaxed);
                                    let _ = app_handle.emit("new-block", block);
                                }
@@ -708,6 +711,7 @@ pub async fn start_p2p_node(
                                     log::info!("P2P Sync: Batch Received Block #{}", block.index);
                                     if storage.get_block(block.index).unwrap_or(None).is_none() {
                                         if let Ok(_) = storage.save_block(&block) {
+                                            consensus.lock().unwrap().mark_peer_active(block.author.clone());
                                             chain_index.store(block.index, Ordering::Relaxed);
                                             let _ = app_handle.emit("new-block", block);
                                         }
@@ -721,6 +725,7 @@ pub async fn start_p2p_node(
                                 log::info!("P2P Sync: Received Block #{}", block.index);
                                  if storage.get_block(block.index).unwrap_or(None).is_none() {
                                     if let Ok(_) = storage.save_block(&block) {
+                                        consensus.lock().unwrap().mark_peer_active(block.author.clone());
                                         chain_index.store(block.index, Ordering::Relaxed);
                                         let _ = app_handle.emit("new-block", block.clone());
                                         let _ = app_handle.emit("node-status", format!("Synced Block #{}", block.index));

@@ -34,7 +34,9 @@ pub fn run() {
         .expect("Failed to initialize logger");
 
     // Initialize DB
-    let mut db_path = std::env::temp_dir();
+    let mut db_path = dirs::data_dir().unwrap_or_else(std::env::temp_dir);
+    db_path.push("centichain");
+    std::fs::create_dir_all(&db_path).ok();
     db_path.push("centichain.db");
     let storage = Storage::new(db_path.to_str().unwrap()).expect("Failed to create DB");
     let storage_arc = Arc::new(storage);

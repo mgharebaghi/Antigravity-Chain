@@ -22,7 +22,8 @@ import { cn } from "../lib/utils";
 
 interface AppSettings {
     node_name: string;
-    relay_address: string;
+    relay_addresses: string[];
+    allow_relay_free_mode: boolean;
     mining_enabled: boolean;
     max_peers: number;
     node_type: "Full" | "Pruned";
@@ -33,7 +34,8 @@ export default function Settings() {
     // const { theme } = useTheme();
     const [settings, setSettings] = useState<AppSettings>({
         node_name: "Centichain-Node-01",
-        relay_address: "/ip4/127.0.0.1/tcp/9090",
+        relay_addresses: ["/ip4/127.0.0.1/tcp/9090"],
+        allow_relay_free_mode: true,
         mining_enabled: true,
         max_peers: 50,
         node_type: "Pruned",
@@ -144,8 +146,8 @@ export default function Settings() {
                             </label>
                             <input
                                 type="text"
-                                value={settings.relay_address}
-                                onChange={(e) => setSettings({ ...settings, relay_address: e.target.value })}
+                                value={settings.relay_addresses[0] || ""}
+                                onChange={(e) => setSettings({ ...settings, relay_addresses: [e.target.value] })}
                                 className="w-full px-3 py-2 rounded-md border border-input bg-background/50 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                                 placeholder="/ip4/127.0.0.1/tcp/9090"
                             />
@@ -163,6 +165,25 @@ export default function Settings() {
                                 onChange={(e) => setSettings({ ...settings, max_peers: parseInt(e.target.value) })}
                                 className="w-full h-1.5 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
                             />
+                        </div>
+
+                        <div
+                            className="flex items-center justify-between p-3 rounded-lg border border-border bg-card cursor-pointer hover:bg-muted/50 transition-colors"
+                            onClick={() => setSettings({ ...settings, allow_relay_free_mode: !settings.allow_relay_free_mode })}
+                        >
+                            <div className="space-y-0.5">
+                                <div className="text-sm font-medium">Relay-free Mode</div>
+                                <div className="text-xs text-muted-foreground">Allow operation without a relay</div>
+                            </div>
+                            <div className={cn(
+                                "h-5 w-9 rounded-full relative transition-colors duration-200",
+                                settings.allow_relay_free_mode ? "bg-primary" : "bg-muted-foreground/30"
+                            )}>
+                                <div className={cn(
+                                    "h-4 w-4 bg-background rounded-full absolute top-0.5 transition-all duration-200 shadow-sm",
+                                    settings.allow_relay_free_mode ? "left-[18px]" : "left-0.5"
+                                )} />
+                            </div>
                         </div>
                     </div>
                 </div>

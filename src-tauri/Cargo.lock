@@ -676,6 +676,7 @@ dependencies = [
  "bincode",
  "bip39",
  "chrono",
+ "dirs",
  "flexi_logger",
  "futures",
  "hex",

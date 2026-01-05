@@ -21,6 +21,7 @@ pub enum NodeType {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(default)]
 pub struct AppSettings {
     pub node_name: String,
     pub relay_addresses: Vec<String>, // Multiple relays for failover

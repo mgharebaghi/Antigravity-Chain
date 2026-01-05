@@ -2,44 +2,90 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// NodeState tracks the active time of a peer
+// ============================================================================
+// NodeState - Tracks validator state for consensus
+// ============================================================================
+
+/// Represents the state of a validator node in the network.
+/// Once a node is activated (via VDF proof + quarantine), it remains eligible
+/// for leadership unless explicitly slashed below the trust threshold.
 #[derive(Debug, Clone)]
 pub struct NodeState {
+    /// Unique identifier for the peer
     pub peer_id: String,
+
+    /// Unix timestamp when the node first joined the network
     pub join_time: u64,
+
+    /// Trust score (0.0 - 1.0). Nodes below 0.01 lose active status.
     pub trust_score: f64,
+
+    /// VDF proof submitted by the node for Proof of Patience
     pub vdf_proof: Option<String>,
+
+    /// Whether the node has verified their VDF proof
     pub is_verified: bool,
-    pub missed_slots: u64,      // Track missed blocks
-    pub addresses: Vec<String>, // Technical Multiaddresses
+
+    /// Whether the node is currently active in consensus
+    pub is_active: bool,
+
+    /// Unix timestamp when node was activated (None = never activated)
+    /// Once set, the node remains eligible regardless of quarantine changes
+    pub activated_at: Option<u64>,
+
+    /// Number of slots this node has missed as leader
+    pub missed_slots: u64,
+
+    /// Multiaddresses for this peer
+    pub addresses: Vec<String>,
 }
 
 impl NodeState {
+    /// Creates a new NodeState for a peer joining the network
     pub fn new(peer_id: String) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         NodeState {
             peer_id,
-            join_time: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            join_time: now,
             trust_score: 0.1,
             vdf_proof: None,
             is_verified: false,
+            is_active: false,
+            activated_at: None,
             missed_slots: 0,
             addresses: Vec::new(),
         }
     }
 
+    /// Returns how long this node has been online (in seconds)
     pub fn current_uptime(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        if now > self.join_time {
-            now - self.join_time
-        } else {
-            0
+        now.saturating_sub(self.join_time)
+    }
+
+    /// Activates the node, recording the activation timestamp
+    pub fn activate(&mut self) {
+        if self.activated_at.is_none() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            self.activated_at = Some(now);
+            self.is_active = true;
+            log::info!("Node {} activated at timestamp {}", self.peer_id, now);
         }
+    }
+
+    /// Checks if this node was already activated (persisted eligibility)
+    pub fn is_permanently_eligible(&self) -> bool {
+        self.activated_at.is_some() && self.trust_score >= 0.01
     }
 }
 
@@ -76,22 +122,44 @@ impl Consensus {
             // However, to start mining solo, we often boostrap:
             node.is_verified = true;
             node.trust_score = 1.0;
+            // node.is_active = true; // REMOVED: Auto-active disabled. Must prove patience or be Genesis.
             self.nodes.insert(peer_id, node);
         }
     }
 
+    /// Force-activates the local node (used for Genesis creator)
+    /// This grants immediate active status without quarantine.
+    pub fn force_activate_local(&mut self) {
+        if let Some(peer_id) = &self.local_peer_id {
+            if let Some(node) = self.nodes.get_mut(peer_id) {
+                node.activate(); // Use the new activate method
+                node.is_verified = true; // Genesis creator is always verified
+                node.trust_score = 1.0;
+                log::info!("Consensus: Local node FORCE ACTIVATED (Genesis/Authoritative Mode)");
+            }
+        }
+    }
+
+    /// Slashes a node for misbehavior (missing slots)
+    /// Trust score is halved. If it falls below 0.01, active status is revoked.
     pub fn slash_node(&mut self, peer_id: &String) {
         if let Some(node) = self.nodes.get_mut(peer_id) {
             node.missed_slots += 1;
             node.trust_score *= 0.5; // Halve the trust score
+
             if node.trust_score < 0.01 {
-                node.trust_score = 0.01; // Floor
+                node.trust_score = 0.01; // Floor at minimum
+                node.is_active = false; // Revoke active status
+                node.activated_at = None; // Remove permanent eligibility
+                log::warn!("Node {} DEACTIVATED due to low trust score", peer_id);
             }
+
             log::warn!(
-                "SLASHED Node {}: Missed Slots: {}, New Score: {}",
+                "SLASHED Node {}: Missed Slots: {}, Trust: {:.3}, Active: {}",
                 peer_id,
                 node.missed_slots,
-                node.trust_score
+                node.trust_score,
+                node.is_active
             );
         }
     }
@@ -132,25 +200,85 @@ impl Consensus {
         }
     }
 
-    // Check if a node is fully eligible to be a leader
-    pub fn is_eligible_for_leadership(&self, peer_id: &String) -> bool {
-        if let Some(node) = self.nodes.get(peer_id) {
-            let uptime = node.current_uptime();
-            let q_duration = self.get_quarantine_duration();
+    // =========================================================================
+    // Leadership Eligibility
+    // =========================================================================
 
-            // Special Case: Solo Validator
-            // If there is only 1 node in the network (us), we skip the quarantine "Patience" requirement.
-            // USER REQUIREMENT: "Without any preconditions" -> Return true immediately.
-            if self.nodes.len() == 1 {
-                return true;
+    /// Checks if a node is eligible for block production leadership.
+    ///
+    /// A node is eligible if:
+    /// 1. Already permanently activated (activated_at is set) with good trust
+    /// 2. Solo node (only node in network) - bootstrap exception
+    /// 3. Verified + completed quarantine + good trust score
+    pub fn is_eligible_for_leadership(&self, peer_id: &String) -> bool {
+        let Some(node) = self.nodes.get(peer_id) else {
+            return false;
+        };
+
+        // Rule 1: Permanently activated nodes stay eligible (Grandfather Clause)
+        // This is the KEY fix - once activated, a node doesn't need to re-qualify
+        if node.is_permanently_eligible() {
+            return true;
+        }
+
+        // Rule 2: Solo node bootstrap exception
+        if self.nodes.len() == 1 {
+            return true;
+        }
+
+        // Rule 3: Fresh node must complete VDF + quarantine
+        let uptime = node.current_uptime();
+        let q_duration = self.get_quarantine_duration();
+
+        if node.is_verified && uptime >= q_duration && node.trust_score >= 0.01 {
+            return true;
+        }
+
+        false
+    }
+
+    /// Periodically updates active status for all nodes.
+    /// Promotes eligible nodes and demotes nodes with low trust.
+    ///
+    /// Called every iteration of the mining loop.
+    pub fn update_active_status(&mut self) {
+        let node_count = self.nodes.len();
+        let q_duration = self.get_quarantine_duration();
+
+        for (_, node) in self.nodes.iter_mut() {
+            // Demote nodes with critically low trust
+            if node.trust_score < 0.01 {
+                if node.is_active {
+                    node.is_active = false;
+                    node.activated_at = None;
+                    log::warn!("Node {} DEMOTED due to low trust", node.peer_id);
+                }
+                continue;
             }
 
-            // 1. Must be Verified (VDF Solved)
-            // 2. Must be out of Quarantine (Uptime > Duration)
-            // 3. Must have decent trust score (not banned)
-            node.is_verified && uptime >= q_duration && node.trust_score >= 0.01
-        } else {
-            false
+            // Skip already activated nodes - they stay active
+            if node.activated_at.is_some() {
+                continue;
+            }
+
+            // Check if node qualifies for activation
+            let should_activate = if node_count == 1 {
+                // Solo node: immediate activation
+                true
+            } else {
+                // Network node: must be verified and complete quarantine
+                node.is_verified && node.current_uptime() >= q_duration
+            };
+
+            if should_activate {
+                node.activate();
+                log::info!(
+                    "Node {} PROMOTED to Active Validator (uptime: {}s, quarantine: {}s)",
+                    node.peer_id,
+                    node.current_uptime(),
+                    q_duration
+                );
+            }
         }
     }
 
@@ -244,14 +372,59 @@ impl Consensus {
             return None;
         }
 
+        if eligible_validators.is_empty() {
+            return None;
+        }
+
         // 2. Sort to ensure strict consensus on order
         eligible_validators.sort();
 
-        // 3. Round-Robin Selection
-        // Simple Modulo arithmetic ensures perfect rotation fairness.
-        let index = (slot as usize) % eligible_validators.len();
+        // 3. Deterministic Randomness (Weighted by Slot + Epoch)
+        // SHA256(Epoch + Slot) % Count
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(shard_id.to_be_bytes());
+        hasher.update(epoch.to_be_bytes());
+        hasher.update(slot.to_be_bytes());
+        let result = hasher.finalize();
+        // Use first 8 bytes for randomness index
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&result[0..8]);
+        let rand_val = u64::from_le_bytes(bytes);
+
+        let index = (rand_val as usize) % eligible_validators.len();
 
         Some(eligible_validators[index].clone())
+    }
+
+    /// Automatically activates a peer who authored a valid block.
+    ///
+    /// When we receive a valid block from a peer, we trust they went through
+    /// proper verification on other nodes. This ensures new joiners correctly
+    /// recognize existing chain authors as active validators.
+    pub fn mark_peer_active(&mut self, peer_id: String) {
+        if let Some(node) = self.nodes.get_mut(&peer_id) {
+            if node.activated_at.is_none() {
+                log::info!(
+                    "Consensus: Peer {} authored valid block - granting active status",
+                    peer_id
+                );
+                node.activate();
+                node.is_verified = true;
+                node.trust_score = (node.trust_score * 1.05).min(1.0);
+            }
+        } else {
+            // Unknown peer authored a block - register and activate
+            let mut node = NodeState::new(peer_id.clone());
+            node.activate();
+            node.is_verified = true;
+            node.trust_score = 1.0;
+            self.nodes.insert(peer_id.clone(), node);
+            log::info!(
+                "Consensus: New peer {} registered and activated via block authorship",
+                peer_id
+            );
+        }
     }
 
     /// Identify and slash leaders who missed their slots between two blocks.
@@ -332,6 +505,7 @@ impl Consensus {
             }
         } else if !eligible {
             // Patience Mode / Quarantine
+            // Only if NOT active. If active, eligible returns true, so we don't go here.
             let progress = if quarantine_duration > 0 {
                 (uptime as f64 / quarantine_duration as f64).min(1.0)
             } else {
@@ -436,48 +610,7 @@ mod tests {
         assert!(uptime < duration);
     }
 
-    #[test]
-    fn test_round_robin_selection() {
-        let mut consensus = Consensus::new();
-
-        // Mock 2 eligible nodes
-        consensus.nodes.insert("nodeA".to_string(), {
-            let mut n = NodeState::new("nodeA".to_string());
-            n.is_verified = true;
-            n.trust_score = 1.0;
-            n.join_time = 0;
-            n // Mock uptime > quarantine
-        });
-        consensus.nodes.insert("nodeB".to_string(), {
-            let mut n = NodeState::new("nodeB".to_string());
-            n.is_verified = true;
-            n.trust_score = 1.0;
-            n.join_time = 0;
-            n
-        });
-
-        // Current epoch 0. Both assigned to same shard (likely 0 if <50 nodes)
-        let shard = consensus.get_assigned_shard("nodeA", 0);
-
-        // Note: With shard logic, different IDs might map to different shards if unlucky.
-        // But with only 1 active shard (nodes<50), they are ALL in shard 0.
-        // Let's verify active shards = 1.
-        assert_eq!(consensus.calculate_active_shards(), 1);
-
-        // Slot 0 -> nodeA or nodeB?
-        // SortedIDs: [nodeA, nodeB]
-        // Slot 0 % 2 = 0 -> nodeA
-        let leader0 = consensus.get_shard_leader(shard, 0).unwrap();
-        assert_eq!(leader0, "nodeA");
-
-        // Slot 1 % 2 = 1 -> nodeB
-        let leader1 = consensus.get_shard_leader(shard, 1).unwrap();
-        assert_eq!(leader1, "nodeB");
-
-        // Slot 2 % 2 = 0 -> nodeA
-        let leader2 = consensus.get_shard_leader(shard, 2).unwrap();
-        assert_eq!(leader2, "nodeA");
-    }
+    // test_round_robin_selection removed (replaced by test_deterministic_randomness)
 
     #[test]
     fn test_slashing() {
@@ -525,16 +658,119 @@ mod tests {
             "Solo node should be eligible immediately"
         );
 
-        // Add a second node
+        // CRITICAL: Activate the node WHILE it's still solo
+        // This simulates real behavior - update_active_status is called every loop iteration
+        consensus.update_active_status();
+
+        // Verify activation happened
+        assert!(
+            consensus
+                .nodes
+                .get(&peer_id)
+                .unwrap()
+                .activated_at
+                .is_some(),
+            "Solo node should have been activated"
+        );
+
+        // NOW add a second node
         consensus
             .nodes
             .insert("node2".to_string(), NodeState::new("node2".to_string()));
 
-        // Now len() == 2. Solo node exemption should NOT apply.
-        // It needs uptime now (Strict Quarantine applies to network > 1).
+        // KEY BEHAVIOR: Once activated, the first node STAYS activated
+        // even when more nodes join (grandfather clause)
         assert!(
-            !consensus.is_eligible_for_leadership(&peer_id),
-            "Node should strictly follow quarantine once network > 1"
+            consensus.is_eligible_for_leadership(&peer_id),
+            "Activated node should stay eligible when more nodes join"
+        );
+    }
+
+    #[test]
+    fn test_deterministic_randomness() {
+        let mut consensus = Consensus::new();
+        // Setup 3 nodes with proper activation
+        for i in 0..3 {
+            let pid = format!("node{}", i);
+            let mut n = NodeState::new(pid.clone());
+            n.activate(); // Use new method
+            n.trust_score = 1.0;
+            n.is_verified = true;
+            consensus.nodes.insert(pid, n);
+        }
+
+        let leader_slot_10 = consensus.get_shard_leader(0, 10).unwrap();
+        let leader_slot_10_again = consensus.get_shard_leader(0, 10).unwrap();
+
+        // Determinism Check
+        assert_eq!(leader_slot_10, leader_slot_10_again);
+
+        let leader_slot_11 = consensus.get_shard_leader(0, 11).unwrap();
+        // Likely different, but not guaranteed (1/3 chance)
+        println!("Slot 10: {}, Slot 11: {}", leader_slot_10, leader_slot_11);
+    }
+
+    #[test]
+    fn test_implicit_activation() {
+        let mut consensus = Consensus::new();
+        let peer_id = "new_joiner".to_string();
+
+        // Node joins
+        consensus.register_node(peer_id.clone());
+        assert!(consensus
+            .nodes
+            .get(&peer_id)
+            .unwrap()
+            .activated_at
+            .is_none());
+
+        // Produces valid block (simulated reception)
+        consensus.mark_peer_active(peer_id.clone());
+
+        assert!(consensus.nodes.get(&peer_id).unwrap().is_active);
+        assert!(consensus.nodes.get(&peer_id).unwrap().is_verified);
+        assert!(consensus
+            .nodes
+            .get(&peer_id)
+            .unwrap()
+            .activated_at
+            .is_some());
+    }
+
+    #[test]
+    fn test_persistent_eligibility() {
+        // This test verifies the KEY fix: once activated, nodes stay eligible
+        let mut consensus = Consensus::new();
+
+        // Setup first node as activated
+        let node1 = "node1".to_string();
+        let mut n1 = NodeState::new(node1.clone());
+        n1.activate();
+        n1.is_verified = true;
+        n1.trust_score = 1.0;
+        consensus.nodes.insert(node1.clone(), n1);
+
+        // Verify node1 is eligible
+        assert!(consensus.is_eligible_for_leadership(&node1));
+
+        // Add many more nodes (this increases quarantine duration)
+        for i in 2..10 {
+            let pid = format!("node{}", i);
+            consensus
+                .nodes
+                .insert(pid, NodeState::new(format!("node{}", i)));
+        }
+
+        // Node1 should STILL be eligible (grandfather clause)
+        assert!(
+            consensus.is_eligible_for_leadership(&node1),
+            "Activated node should remain eligible regardless of quarantine changes"
+        );
+
+        // New nodes should NOT be eligible (haven't done quarantine)
+        assert!(
+            !consensus.is_eligible_for_leadership(&"node2".to_string()),
+            "New node should not be eligible without completing quarantine"
         );
     }
 }
