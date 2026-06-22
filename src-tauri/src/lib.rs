@@ -121,6 +121,7 @@ pub fn run() {
             mining_enabled: Arc::new(AtomicBool::new(initial_mining)),
             node_type: Arc::new(Mutex::new(initial_node_type)),
             vdf_ips: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            p2p_cmd_sender: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![

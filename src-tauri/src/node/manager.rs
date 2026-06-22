@@ -66,6 +66,12 @@ pub async fn start_node_service(
     };
     let relay_addresses = settings.relay_addresses.clone();
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(100);
+
+    // Store P2P command sender in AppState for broadcasting mining status changes
+    {
+        let mut sender = state.p2p_cmd_sender.lock().unwrap();
+        *sender = Some(cmd_tx.clone());
+    }
     let validator_count_p2p = state.validator_count.clone();
     let peer_count_p2p = state.peer_count.clone();
     let is_synced_p2p = state.is_synced.clone();
@@ -78,6 +84,33 @@ pub async fn start_node_service(
     let node_type_p2p = state.node_type.clone();
     let relay_connected_p2p = state.relay_connected.clone();
     let app_handle_p2p = app_handle.clone();
+
+    // === CRITICAL FIX ===
+    // Set local_peer_id and activate node BEFORE spawning P2P and mining loops
+    // This prevents the race condition where mining loop calls force_activate_local
+    // before P2P has set local_peer_id
+    if let Some(ref wk) = wallet_keypair {
+        let local_peer_id = libp2p::PeerId::from(wk.public());
+        let local_chain_exists = storage_p2p.get_block(0).unwrap_or(None).is_some();
+
+        let mut c = state.consensus.lock().unwrap();
+        c.set_local_peer_id(local_peer_id.to_string());
+
+        // If we have an existing chain, force activate ourselves immediately
+        // This ensures we stay eligible when peers join
+        if local_chain_exists {
+            c.force_activate_local();
+            println!(
+                "[MANAGER] Existing chain detected - local node activated: {}",
+                local_peer_id
+            );
+        } else {
+            println!(
+                "[MANAGER] No local chain - local node registered: {}",
+                local_peer_id
+            );
+        }
+    }
 
     // --- P2P START ---
     tokio::spawn(async move {

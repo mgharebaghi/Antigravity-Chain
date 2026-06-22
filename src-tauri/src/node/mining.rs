@@ -3,15 +3,14 @@
 //! This module handles block production and the main mining loop.
 //!
 //! Key responsibilities:
-//! - Network discovery and initialization
-//! - Genesis block creation (for first node)
+//! - Spawning the mining loop
 //! - Slot-based leader election and block production
 //! - Transaction processing and cross-shard receipts
 //!
 //! IMPORTANT: This loop is designed to be non-blocking and yield-friendly
 //! to allow P2P and VDF operations to run concurrently.
 
-use crate::chain::{self, Transaction};
+use crate::chain;
 use crate::consensus::mempool::Mempool;
 use crate::consensus::vdf::CentichainVDF;
 use crate::consensus::Consensus;
@@ -23,18 +22,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
+use super::helpers::{
+    collect_shard_transactions, create_coinbase_tx, run_auto_pruning, slash_missed_slots,
+};
+use super::network_init::initialize_network_state;
+use super::relay::{emit_relay_error, wait_for_relay, RELAY_CONNECTION_TIMEOUT};
+
 // =============================================================================
 // Constants
 // =============================================================================
-
-/// Time to wait for relay connection (seconds)
-const RELAY_CONNECTION_TIMEOUT: u64 = 10;
-
-/// Time to search for peers before assuming first node (seconds)
-const PEER_DISCOVERY_TIMEOUT: u64 = 60;
-
-/// Maximum time to wait for sync (seconds)
-const SYNC_TIMEOUT: u64 = 300;
 
 /// Minimum slot progress (seconds) before producing a block
 /// This allows network gossip to propagate first
@@ -67,7 +63,7 @@ pub fn spawn_mining_loop(
     mining_enabled: Arc<AtomicBool>,
     receipt_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::chain::Receipt>>>>,
     node_type: Arc<Mutex<NodeType>>,
-    cmd_tx: tokio::sync::mpsc::Sender<crate::network::p2p::P2PCommand>,
+    cmd_tx: tokio::sync::mpsc::Sender<crate::network::P2PCommand>,
     block_sender: tokio::sync::mpsc::Sender<Box<crate::chain::Block>>,
     my_run_id: u64,
     wallet_addr: String,
@@ -147,288 +143,6 @@ pub fn spawn_mining_loop(
         )
         .await;
     });
-}
-
-// =============================================================================
-// Phase 1: Relay Connection
-// =============================================================================
-
-/// Waits for relay connection or timeout
-async fn wait_for_relay(
-    is_running: &Arc<AtomicBool>,
-    run_id: &Arc<AtomicU64>,
-    my_run_id: u64,
-    relay_connected: &Arc<AtomicBool>,
-    timeout_secs: u64,
-) -> bool {
-    for i in 0..timeout_secs {
-        if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
-            return false;
-        }
-
-        if relay_connected.load(Ordering::Relaxed) {
-            log::info!("Mining Loop: Relay connected after {}s", i);
-            return true;
-        }
-
-        log::debug!("Mining Loop: Waiting for relay... ({}s)", i);
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    false
-}
-
-/// Emits relay error and waits for node stop
-async fn emit_relay_error(
-    app_handle: &AppHandle,
-    is_running: &Arc<AtomicBool>,
-    run_id: &Arc<AtomicU64>,
-    my_run_id: u64,
-) {
-    let _ = app_handle.emit("node-status", "Error: Relay Unreachable");
-
-    while is_running.load(Ordering::Relaxed) && run_id.load(Ordering::Relaxed) == my_run_id {
-        let _ = app_handle.emit(
-            "node-status",
-            "Error: Relay Unreachable. Please check config/network.",
-        );
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-}
-
-// =============================================================================
-// Phase 2: Network Initialization
-// =============================================================================
-
-/// Initializes network state: discovers peers, syncs, or becomes first node
-#[allow(clippy::too_many_arguments)]
-async fn initialize_network_state(
-    app_handle: &AppHandle,
-    is_running: &Arc<AtomicBool>,
-    run_id: &Arc<AtomicU64>,
-    my_run_id: u64,
-    validator_count: &Arc<AtomicUsize>,
-    storage: &Arc<Storage>,
-    is_synced: &Arc<AtomicBool>,
-    consensus: &Arc<Mutex<Consensus>>,
-    chain_index: &Arc<AtomicU64>,
-    mined_by_me_count: &Arc<AtomicU64>,
-    cmd_tx: &tokio::sync::mpsc::Sender<crate::network::p2p::P2PCommand>,
-    wallet_addr: &str,
-    peer_count: &Arc<AtomicUsize>,
-) -> bool {
-    loop {
-        if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
-            return false;
-        }
-
-        let peers = validator_count.load(Ordering::Relaxed);
-        let local_chain_exists = storage.get_block(0).unwrap_or(None).is_some();
-
-        log::info!(
-            "Mining Loop: Discovery - Peers: {}, LocalChain: {}",
-            peers,
-            local_chain_exists
-        );
-
-        if peers > 0 {
-            // Peers found - sync with network
-            return sync_with_network(
-                app_handle, is_running, run_id, my_run_id, storage, is_synced, cmd_tx, peer_count,
-            )
-            .await;
-        }
-
-        // No peers - either wait for discovery or become first node
-        if !local_chain_exists {
-            // Wait for peer discovery
-            let found_peers = wait_for_peers(
-                app_handle,
-                is_running,
-                run_id,
-                my_run_id,
-                validator_count,
-                cmd_tx,
-                PEER_DISCOVERY_TIMEOUT,
-            )
-            .await;
-
-            if found_peers {
-                continue; // Restart loop to sync with found peers
-            }
-
-            // No peers found - become first node
-            log::info!("Mining Loop: No peers found. Creating Genesis...");
-            create_genesis_block(
-                app_handle,
-                storage,
-                consensus,
-                chain_index,
-                mined_by_me_count,
-                is_synced,
-                wallet_addr,
-            )
-            .await;
-            return true;
-        }
-
-        // Local chain exists, no peers - continue solo
-        log::info!("Mining Loop: Resuming solo mining with existing chain");
-        {
-            let mut c = consensus.lock().unwrap();
-            c.force_activate_local();
-        }
-        is_synced.store(true, Ordering::Relaxed);
-        let _ = app_handle.emit("node-status", "Active (Solo)");
-        return true;
-    }
-}
-
-/// Waits for peers to be discovered
-async fn wait_for_peers(
-    app_handle: &AppHandle,
-    is_running: &Arc<AtomicBool>,
-    run_id: &Arc<AtomicU64>,
-    my_run_id: u64,
-    validator_count: &Arc<AtomicUsize>,
-    cmd_tx: &tokio::sync::mpsc::Sender<crate::network::p2p::P2PCommand>,
-    timeout_secs: u64,
-) -> bool {
-    for i in 0..timeout_secs {
-        if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
-            return false;
-        }
-
-        if validator_count.load(Ordering::Relaxed) > 0 {
-            return true;
-        }
-
-        let _ = app_handle.emit("node-status", format!("Discovering Network... ({}s)", i));
-        let _ = cmd_tx.try_send(crate::network::p2p::P2PCommand::SyncWithNetwork);
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    false
-}
-
-/// Syncs with the network
-async fn sync_with_network(
-    app_handle: &AppHandle,
-    is_running: &Arc<AtomicBool>,
-    run_id: &Arc<AtomicU64>,
-    my_run_id: u64,
-    storage: &Arc<Storage>,
-    is_synced: &Arc<AtomicBool>,
-    cmd_tx: &tokio::sync::mpsc::Sender<crate::network::p2p::P2PCommand>,
-    peer_count: &Arc<AtomicUsize>,
-) -> bool {
-    log::info!("Mining Loop: Starting sync with network");
-    let _ = app_handle.emit("node-status", "Synchronizing...");
-    let _ = cmd_tx
-        .send(crate::network::p2p::P2PCommand::SyncWithNetwork)
-        .await;
-
-    for i in 0..SYNC_TIMEOUT {
-        if !is_running.load(Ordering::Relaxed) || run_id.load(Ordering::Relaxed) != my_run_id {
-            return false;
-        }
-
-        let height = storage.get_latest_index().unwrap_or(0);
-        let peers = peer_count.load(Ordering::Relaxed);
-
-        // Check if synced (either flag set or have local blocks after timeout)
-        if is_synced.load(Ordering::Relaxed) {
-            log::info!("Mining Loop: Sync complete at height {}", height);
-            return true;
-        }
-
-        if storage.get_block(0).unwrap_or(None).is_some() && i > 10 {
-            log::info!("Mining Loop: Local chain detected, marking synced");
-            is_synced.store(true, Ordering::Relaxed);
-            return true;
-        }
-
-        if i % 5 == 0 {
-            let _ = app_handle.emit(
-                "node-status",
-                format!("Synchronizing... ({} peers, {}s)", peers, i),
-            );
-            let _ = cmd_tx.try_send(crate::network::p2p::P2PCommand::SyncWithNetwork);
-        }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
-
-    // Timeout - check if we have any data
-    if storage.get_block(0).unwrap_or(None).is_some() {
-        is_synced.store(true, Ordering::Relaxed);
-        return true;
-    }
-
-    false
-}
-
-/// Creates the genesis block
-async fn create_genesis_block(
-    app_handle: &AppHandle,
-    storage: &Arc<Storage>,
-    consensus: &Arc<Mutex<Consensus>>,
-    chain_index: &Arc<AtomicU64>,
-    mined_by_me_count: &Arc<AtomicU64>,
-    is_synced: &Arc<AtomicBool>,
-    wallet_addr: &str,
-) {
-    let _ = app_handle.emit("node-status", "Creating Genesis Block...");
-
-    let genesis_tx = Transaction {
-        id: "genesis".to_string(),
-        sender: "SYSTEM".to_string(),
-        receiver: wallet_addr.to_string(),
-        amount: crate::utils::constants::GENESIS_SUPPLY,
-        shard_id: 0,
-        timestamp: 0,
-        signature: "genesis".to_string(),
-    };
-
-    let mut genesis_block = chain::Block::new(
-        0,
-        wallet_addr.to_string(),
-        vec![genesis_tx],
-        "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-        100,
-        100, // Low difficulty for genesis
-        0,
-        0,
-        crate::utils::constants::GENESIS_SUPPLY,
-    );
-
-    // Solve VDF for genesis (quick, low difficulty)
-    let vdf = CentichainVDF::new(genesis_block.vdf_difficulty);
-    let challenge = genesis_block.calculate_hash();
-    genesis_block.vdf_proof = vdf.solve(challenge.as_bytes());
-    genesis_block.hash = genesis_block.calculate_hash();
-    genesis_block.size = genesis_block.calculate_size();
-
-    // Save genesis
-    if let Err(e) = storage.save_block(&genesis_block) {
-        log::error!("Failed to save genesis block: {}", e);
-        return;
-    }
-
-    chain_index.store(0, Ordering::Relaxed);
-    mined_by_me_count.fetch_add(1, Ordering::Relaxed);
-    let _ = app_handle.emit("new-block", genesis_block);
-
-    // Activate local node as genesis creator
-    {
-        let mut c = consensus.lock().unwrap();
-        c.force_activate_local();
-    }
-
-    is_synced.store(true, Ordering::Relaxed);
-    let _ = app_handle.emit("node-status", "Active (Genesis)");
-    log::info!("Mining Loop: Genesis block created successfully");
 }
 
 // =============================================================================
@@ -682,147 +396,5 @@ async fn block_production_loop(
         mempool.remove_transactions(&tx_ids);
 
         log::info!("Mining Loop: Block {} produced and broadcast", target_idx);
-    }
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-/// Runs auto-pruning if needed
-fn run_auto_pruning(storage: &Arc<Storage>) {
-    let height = storage.get_latest_index().unwrap_or(0);
-    if height > 1000 && height % 300 == 0 {
-        if let Err(e) = storage.prune_history(1000) {
-            log::error!("Auto-pruning failed: {}", e);
-        } else {
-            log::info!("Auto-pruning triggered at height {}", height);
-        }
-    }
-}
-
-/// Creates a coinbase transaction for block reward
-fn create_coinbase_tx(
-    receiver: &str,
-    block_index: u64,
-    block_reward: u64,
-    total_fees: u64,
-) -> chain::Transaction {
-    if block_index == 0 {
-        chain::Transaction {
-            id: "genesis".to_string(),
-            sender: "SYSTEM".to_string(),
-            receiver: receiver.to_string(),
-            amount: block_reward,
-            shard_id: 0,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            signature: "genesis".to_string(),
-        }
-    } else {
-        chain::Transaction {
-            id: uuid::Uuid::new_v4().to_string(),
-            sender: "SYSTEM".to_string(),
-            receiver: receiver.to_string(),
-            amount: block_reward + total_fees,
-            shard_id: 0,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            signature: "reward".to_string(),
-        }
-    }
-}
-
-/// Collects transactions for this shard and generates cross-shard receipts
-fn collect_shard_transactions(
-    coinbase_tx: chain::Transaction,
-    pending_txs: &[chain::Transaction],
-    my_shard_id: u16,
-    consensus: &Arc<Mutex<Consensus>>,
-    _receipt_sender: &Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::chain::Receipt>>>>,
-) -> (Vec<chain::Transaction>, Vec<crate::chain::Receipt>) {
-    let mut block_txs = vec![coinbase_tx];
-    let mut receipts = Vec::new();
-    let mut current_size = 300; // Approx coinbase size
-
-    for tx in pending_txs.iter() {
-        // Check shard routing
-        if tx.shard_id != my_shard_id {
-            continue;
-        }
-
-        // Check TPS limit
-        if block_txs.len() >= crate::utils::constants::MAX_TXS_PER_BLOCK as usize {
-            break;
-        }
-
-        // Check block size limit
-        if current_size + 300 > crate::utils::constants::MAX_BLOCK_SIZE {
-            break;
-        }
-
-        // Generate cross-shard receipt if needed
-        let target_shard = {
-            let c = consensus.lock().unwrap();
-            c.get_assigned_shard(&tx.receiver, 0)
-        };
-
-        if target_shard != my_shard_id {
-            let receipt = crate::chain::Receipt {
-                original_tx_id: tx.id.clone(),
-                source_shard: my_shard_id,
-                target_shard,
-                amount: tx.amount,
-                receiver: tx.receiver.clone(),
-                block_hash: "pending".to_string(),
-                merkle_proof: vec![],
-                status: crate::chain::ReceiptStatus::Pending,
-            };
-            receipts.push(receipt);
-            log::info!(
-                "Generated cross-shard receipt: {} -> Shard {}",
-                tx.id,
-                target_shard
-            );
-        }
-
-        block_txs.push(tx.clone());
-        current_size += 300;
-    }
-
-    (block_txs, receipts)
-}
-
-/// Slashes validators who missed their slots
-fn slash_missed_slots(
-    storage: &Arc<Storage>,
-    consensus: &Arc<Mutex<Consensus>>,
-    target_idx: u64,
-    new_block: &chain::Block,
-    my_shard_id: u16,
-) {
-    if target_idx == 0 {
-        return;
-    }
-
-    let prev_block_timestamp = storage
-        .get_block(target_idx - 1)
-        .unwrap_or(None)
-        .map(|b| b.timestamp)
-        .unwrap_or(0);
-
-    let prev_slot = prev_block_timestamp / crate::consensus::Consensus::SLOT_DURATION;
-    let new_block_slot = new_block.timestamp / crate::consensus::Consensus::SLOT_DURATION;
-
-    if new_block_slot > prev_slot + 1 {
-        let mut c = consensus.lock().unwrap();
-        let slashed = c.slash_missed_slots(prev_slot + 1, new_block_slot - 1, my_shard_id);
-        if !slashed.is_empty() {
-            log::warn!("Slashed nodes for missing slots: {:?}", slashed);
-        }
     }
 }

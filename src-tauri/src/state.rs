@@ -67,4 +67,6 @@ pub struct AppState {
     pub mining_enabled: Arc<AtomicBool>,
     pub node_type: Arc<Mutex<NodeType>>,
     pub vdf_ips: Arc<std::sync::atomic::AtomicU64>,
+    /// Channel to send commands to P2P module (for broadcasting mining status, etc.)
+    pub p2p_cmd_sender: Arc<Mutex<Option<tokio::sync::mpsc::Sender<crate::network::P2PCommand>>>>,
 }

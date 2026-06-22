@@ -12,7 +12,7 @@ use centichain_lib::{
     chain::{Block, SyncRequest, SyncResponse, Transaction},
     consensus::mempool::Mempool,
     consensus::Consensus,
-    network::p2p::message_id_fn,
+    network::message_id_fn,
     storage::Storage,
 };
 use libp2p::{
