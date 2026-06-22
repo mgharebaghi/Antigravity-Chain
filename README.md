@@ -1,51 +1,94 @@
-# Centichain 🚀
-**The World's Fastest Decentralized L1 Engine**
+# Centichain
 
-Centichain is a revolutionary Layer 1 blockchain built using **Tauri**, **Rust**, and **React**. It features a unique **Parallel DAG** architecture and **VDF-based consensus** (Proof of Patience) to achieve ultra-high throughput without centralizing the network.
+Layer-1 blockchain for **value storage** with horizontal scaling, **Proof of Patience (PoP)** consensus, and **home-grade validators** (~$2–5/month to run a node).
 
-## 🌟 Key Features
-- **Parallel Execution**: Dependency-aware transaction processing using Block-STM logic.
-- **Ultra-High TPS**: Designed to exceed 150,000 TPS on consumer-grade hardware.
-- **21M Hard Cap**: Strict anti-inflationary tokenomics inspired by the Bitcoin standard.
-- **Proof of Patience (PoP)**: Eco-friendly, Sybil-resistant consensus using Verifiable Delay Functions.
-- **Mesh P2P**: Robust peer-to-peer networking using `libp2p`.
+Built with **Rust + Tauri + React + libp2p**.
 
-## 🛠 Tech Stack
-- **Core Engine**: Rust (Tauri)
-- **Frontend**: React + TypeScript + Tailwind CSS
-- **Networking**: libp2p (Gossipsub, Kademlia DHT)
-- **Database**: ReDB (Local high-performance storage)
-- **Cryptography**: Ed25519, SHA-256, VDF (Patience Proof)
+## Features (target design)
 
-## 🚀 Getting Started
+- **AHSP consensus** — PoP onboarding + round-robin leaders + dynamic sharding
+- **Low node cost** — laptop validator, no ASIC, no mandatory stake
+- **Simple clients** — most users only need a wallet; validators are optional
+- **21M AGT cap** — Bitcoin-style halving
+- **libp2p mesh** — gossip, DHT, relay for NAT traversal
+
+## Quick start
 
 ### Prerequisites
-- [Node.js](https://nodejs.org/) (v18+)
-- [Rust](https://rustup.rs/) (Stable)
-- [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (For Windows users)
 
-### Installation
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
+- [Node.js](https://nodejs.org/) 18+
+- [Rust](https://rustup.rs/) stable
+- Windows: [VS Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 
-### Run in Development
+### Desktop app (validator + wallet)
+
 ```bash
+npm install
 npm run tauri dev
 ```
 
-## 📖 Documentation
-- [Technical Whitepaper (English)](CENTICHAIN_WHITEPAPER.md)
-- [Technical Whitepaper (Persian)](CENTICHAIN_WHITEPAPER_FA.md)
-- [Tokenomics Guide](documentation.md)
+### RPC node (HTTP API for integrations)
 
-## ⚖️ Tokenomics Summary
-- **Total Supply**: 21,000,000 AGT
-- **Genesis Allocation**: 5,000,000 AGT
-- **Initial Reward**: 40 AGT / Block
-- **Mechanism**: Sprint Halving (Scarcity-first model)
+```bash
+cd src-tauri
+cargo run --release --bin rpc_node
+# API: http://localhost:3000/api/v1
+# WebSocket: ws://localhost:3000/ws
+```
 
----
-*Built with ❤️ for the future of decentralized finance.*
+### Relay server (NAT traversal for home nodes)
+
+```bash
+cd src-tauri
+cargo run --release --bin relay_server
+```
+
+### Sharding benchmark (dev)
+
+```bash
+cd src-tauri
+cargo run --release --bin bench_sharding
+```
+
+## Project layout
+
+```
+src-tauri/src/
+  consensus/   # PoP, leadership, sharding, mempool, VDF
+  network/     # libp2p P2P layer
+  node/        # mining loop, relay, network init
+  chain/       # block, transaction, receipt, merkle
+  storage/     # ReDB persistence
+  wallet/      # Ed25519 keys
+  commands/    # Tauri IPC commands
+src/           # React UI
+docs/          # Technical reference (Persian)
+```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [CENTICHAIN_WHITEPAPER.md](CENTICHAIN_WHITEPAPER.md) | English whitepaper (vision, consensus, roadmap) |
+| [docs/MASTER_VISION_AND_TECHNOLOGY_FA.md](docs/MASTER_VISION_AND_TECHNOLOGY_FA.md) | Full technical reference (Persian) — architecture, every technology, phases, gaps |
+
+## Tokenomics (summary)
+
+| | |
+|---|---|
+| Token | AGT (6 decimals) |
+| Max supply | 21,000,000 |
+| Genesis | 5,000,000 AGT |
+| Block time | 2 s |
+| Fee | ≥ 0.001 AGT or 0.01% |
+
+## Implementation status
+
+**Prototype** — P2P, UI, mining, and tokenomics work locally.  
+**Next (Phase 1)** — transaction signing, block validation, fork choice.
+
+See whitepaper §8 and the master doc §15 for the full roadmap.
+
+## License
+
+Private / training project — see repository owner for terms.

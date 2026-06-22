@@ -1,102 +1,214 @@
-# Centichain: The Technical Whitepaper
+# Centichain Technical Whitepaper
+
 **"Speed through Population, Not Power"**
 
-*Version 2.0 - December 2025*
+*Version 3.0 — June 2026*
 
 ---
 
 ## 1. Abstract
-The blockchain trilemma posits that a network cannot simultaneously achieve Decentralization, Security, and Scalability. Traditional "Vertical Scaling" solutions (like Solana) achieve speed by requiring high-performance hardware, which centralizes the network around professional datacenters.
 
-**Centichain** solves this by introducing the **Centichain Horizontal Scaling Protocol (CHSP)**. It decouples transaction throughput from individual node performance. Instead of requiring 1 supercomputer to process 150,000 TPS, Centichain uses 100,000 home-grade computers, each processing a manageable 1,500 TPS, to achieve the same aggregate speed.
+The blockchain trilemma states that decentralization, security, and scalability are hard to maximize together. Vertical scaling (high-end datacenter hardware) improves throughput but centralizes validation.
 
-## 2. Core Philosophy
-1.  **Hardware Neutrality (The Justice Protocol)**: A standard 4-core CPU with a home internet connection must be sufficient to run a Validator. We enforce this via **Memory-Hard VDFs** that neutralize ASICs.
-2.  **Proof of Patience (PoP)**: Security is derived from long-term stake and uptime. "Time" cannot be bought, making the network resistant to Sybil attacks by rich actors.
-3.  **Linear Scalability**: Network capacity increases linearly with the number of nodes.
-    -   1 Node = 1,500 TPS
-    -   100 Nodes = 150,000 TPS
-    -   1 Million Nodes = 1.5 Billion TPS
+**Centichain** targets horizontal scaling: many home-grade validators, each handling a bounded shard workload (~1,500 TPS per shard). Aggregate throughput grows linearly with validator count.
 
-## 3. Technical Architecture
+**Design goals:**
 
-### 3.1 The Beacon Layer (Consensus & Justice)
-The Beacon Chain is the coordinator of the network. It manages the **Global State of Validators** using a unique justice mechanism:
+- Fastest practical L1 throughput via sharding
+- Strong value-storage security via cryptographic validation and Proof of Patience (PoP)
+- Maximum decentralization via low-cost home validators (~$2–5/month electricity)
+- Simplest client experience: wallet-only users do not run full nodes
 
-*   **Memory-Hard VDF**: Unlike traditional VDFs that use simple SHA-256 (vulnerable to ASICs), Centichain uses a **RAM-Latency Bound** algorithm.
-    *   **Mechanism**: The solver must perform millions of random read/write operations to a 64MB RAM buffer.
-    *   **Result**: An ASIC cannot speed up the process significantly because it is limited by RAM latency (DDR speed), which is similar across consumer PCs and servers. This guarantees fairness.
-*   **Registry**: Tracks active validators, their uptime, and Trust Scores.
-*   **Epochs**: Time is divided into 6-hour Epochs for network reshuffling.
-
-### 3.2 Dynamic Sharding (CHSP)
-The global state space is partitioned into $N$ shards.
-
-**The Formula**:
-$$ N = \max(1, \lfloor \frac{Validators}{50} \rfloor) $$
-*We strictly enforce a minimum of 50 validators per shard to ensure BFT security.*
-
-**The Assignment**:
-Validators are assigned to shards using a deterministic **SHA-256** hash of their `PeerID` + `EpochRandomness`. This prevents "Grinding Attacks".
-
-### 3.3 The Shard Engine (Execution & Pruning)
-Each shard operates as a semi-independent blockchain.
-
-*   **True TPS**: **1,500 TPS** per shard.
-*   **State Pruning (Infinity Scaling)**: To allow nodes to run on standard 500GB SSDs indefinitely, Centichain implements **Auto-Pruning**.
-    *   Nodes automatically discard transaction bodies older than ~24 hours.
-    *   They retain **Block Headers** to ensure cryptographic security (SPV verification) remains intact.
-    *   Result: A node's storage requirement stabilizes and does not grow linearly with history.
-
-### 3.4 Cross-Shard Atomicity (The Safety Protocol)
-When User A (Shard 1) sends funds to User B (Shard 2), we guarantee **Zero Loss**:
-
-1.  **Phase 1 (Burn)**: Shard 1 burns funds and generates a `PendingReceipt`.
-2.  **Phase 2 (Mint)**: Shard 2 validates the Receipt.
-    *   **Success**: Mint funds to User B. Receipt becomes `Claimed`.
-    *   **Failure/Timeout**: Shard 2 issues a `RevertReceipt`.
-3.  **Phase 3 (Rollback)**: If failed, Shard 1 sees the `RevertReceipt` and instantly refunds User A.
-
-## 4. Benchmarking & Performance
-Simulations run on the `bench_sharding` tool yielded the following results:
-
-| Network Size | Active Shards | Assignment Time | Global Capacity |
-| :--- | :--- | :--- | :--- |
-| **1,000 Nodes** | 20 | 4 ms | 30,000 TPS |
-| **10,000 Nodes** | 200 | 40 ms | 300,000 TPS |
-| **100,000 Nodes** | 2,000 | 402 ms | 3,000,000 TPS |
-
-## 5. Technology Stack
-
-### Backend (Core)
-*   **Language**: Rust (for safety and performance).
-*   **P2P Networking**: `libp2p` (Gossipsub, Kademlia DHT, Noise encryption).
-*   **Database**: `redb` (Embedded, ACID-compliant key-value store).
-*   **Consensus**: Memory-Hard PoP + SHA-256 Sharding.
-
-### Frontend (Client)
-*   **Framework**: React + TypeScript.
-*   **Platform**: Tauri (v2) for native desktop integration.
-*   **Visuals**: Glassmorphism design with real-time VDF visualization.
-
-## 6. Comparison with Other Networks
-
-| Feature | Centichain | Solana | Ethereum 2.0 |
-| :--- | :--- | :--- | :--- |
-| **Scaling Model** | **Horizontal (Population)** | Vertical (Hardware) | Horizontal (L2s) |
-| **Validator Hardware** | 4-Core CPU, 8GB RAM | 12-Core, 128GB RAM | 4-Core, 16GB RAM |
-| **ASIC Resistance** | **Memory-Hard VDF** | None | None (PoS) |
-| **State Storage** | **Pruned (Stable)** | 100% (Full State) | 100% (Full State) |
-| **TPS Ceiling** | **Unbounded** | ~65,000 (Bounded) | ~100,000 (w/ L2) |
-
-## 7. Roadmap to 150,000 TPS
-1.  **Phase 1 (Completed)**: Core Sharding Engine and Beacon Layer.
-2.  **Phase 2 (Completed)**: Cross-Shard Communication & Atomicity Structures.
-3.  **Phase 3 (Completed)**: The Justice Protocol (Memory-Hard VDF).
-4.  **Phase 4 (Completed)**: Infinity Scaling (State Pruning).
-5.  **Next Frontier**:
-    -   **Mobile Validator**: Porting the pruned node to Android/iOS.
-    -   **AI Governance**: Using LLMs to optimize network parameters dynamically.
+> **Implementation status (June 2026):** Core prototype is functional (P2P, mining loop, UI, tokenomics). Security hardening, true VDF, cross-shard finality, and mainnet readiness are **in progress**. See [Roadmap](#8-roadmap) and [docs/MASTER_VISION_AND_TECHNOLOGY_FA.md](docs/MASTER_VISION_AND_TECHNOLOGY_FA.md).
 
 ---
-*Generated by Centichain AI - 2025*
+
+## 2. Core Philosophy
+
+### 2.1 Hardware Neutrality
+
+A 4-core CPU, 8 GB RAM, and home internet must be enough to run a **pruned validator**. Entry uses a **memory-hard** delay function (RAM-latency bound) to limit ASIC advantage.
+
+### 2.2 Proof of Patience (PoP)
+
+New validators prove commitment with:
+
+1. One-time VDF solve (challenge = `SHA256(peer_id || "Patience")`)
+2. Quarantine wait (5 minutes solo → up to 72 hours on large networks)
+3. Deterministic leader rotation after activation — **no continuous PoW race**
+
+Time cannot be bought with capital alone (unlike large PoS stake requirements).
+
+### 2.3 Linear Scalability (CHSP)
+
+```
+active_shards = max(1, validators / 50)
+global_TPS    ≈ active_shards × 1,500
+```
+
+| Validators | Shards | Theoretical TPS |
+|-----------|--------|-----------------|
+| 50 | 1 | 1,500 |
+| 500 | 10 | 15,000 |
+| 5,000 | 100 | 150,000 |
+| 100,000 | 2,000 | 3,000,000 |
+
+---
+
+## 3. Consensus: AHSP
+
+**Adaptive Hierarchical Sharded Proof-of-Patience**
+
+| Component | Description |
+|-----------|-------------|
+| **PoP** | Sybil-resistant validator onboarding |
+| **Leader election** | Deterministic per slot: `SHA256(shard, epoch, slot) % eligible` |
+| **Sharding** | `shard = SHA256(peer_id, epoch) % active_shards` |
+| **Trust & slashing** | Missed slots reduce trust; deactivation below threshold |
+| **Slot / Epoch** | 2 s slots, 600 s (10 min) epochs |
+
+### 3.1 Validator lifecycle
+
+```
+Join → Solve VDF → Quarantine → Activate → Queue / Leader
+```
+
+Once activated, a validator keeps eligibility (grandfather clause) unless slashed.
+
+### 3.2 Block production rules
+
+- Block time target: **2 seconds**
+- Max transactions per block: **3,000** (1,500 TPS per shard)
+- Leader waits ~1 s into slot for gossip before producing
+- Block reward + fees paid via SYSTEM coinbase transaction
+
+---
+
+## 4. Architecture
+
+### 4.1 Layers
+
+```
+UI (Tauri + React) → Rust Core (consensus, chain, wallet)
+                  → libp2p (gossip, DHT, relay, sync)
+                  → ReDB (blocks, state, mempool)
+```
+
+### 4.2 Network (libp2p)
+
+- **Gossipsub:** blocks, transactions, receipts, VDF proofs
+- **Kademlia + mDNS:** peer discovery
+- **Relay v2 + DCUtR:** NAT traversal for home nodes
+- **Request-response:** chain sync (`GetHeight`, `GetBlocksRange`)
+
+### 4.3 Node tiers
+
+| Tier | Role | Typical hardware |
+|------|------|------------------|
+| Wallet-only | Sign & broadcast via RPC | Phone / browser |
+| Light client *(planned)* | Header + SPV verify | Mobile |
+| Pruned validator | PoP + block production | Laptop, 4 GB RAM |
+| Full validator | Full history | 8 GB RAM, larger SSD |
+| RPC node | P2P + HTTP API | Server or desktop |
+| Relay node | NAT helper only | Low-cost VPS |
+
+### 4.4 Beacon layer *(planned)*
+
+Coordinator for global validator registry, cross-shard **CrossLink** aggregation, and finality. Structs exist in code; full protocol not yet implemented.
+
+### 4.5 Cross-shard atomicity *(planned)*
+
+Three-phase receipt protocol:
+
+1. **Burn** on source shard → `PendingReceipt`
+2. **Mint** or **Revert** on target shard
+3. **Rollback** on source if reverted
+
+Receipt gossip exists; claim/revert handlers are roadmap items.
+
+### 4.6 State & pruning
+
+- Account balances in embedded ReDB
+- Pruned validators keep recent blocks (`PRUNED_HISTORY_BLOCKS = 2000`)
+- Target: stable disk usage for long-running home nodes
+- Target: Merkle Patricia Trie `state_root` per block
+
+---
+
+## 5. Cryptography
+
+| Use | Algorithm |
+|-----|-----------|
+| Transaction & peer identity | Ed25519 |
+| Hashing | SHA-256 |
+| Block / Merkle root | SHA-256 pairwise tree |
+| Transport | Noise (libp2p) |
+| PoP entry | Memory-hard VDF *(Argon2id / class-group VDF planned)* |
+
+**Current gap:** Transaction signatures and full block validation must be enforced before mainnet (Phase 1).
+
+---
+
+## 6. Tokenomics (AGT)
+
+| Parameter | Value |
+|-----------|-------|
+| Max supply | 21,000,000 AGT |
+| Decimals | 6 (1 AGT = 1,000,000 units) |
+| Genesis allocation | 5,000,000 AGT (block 0) |
+| Initial block reward | ~0.127 AGT (`INITIAL_REWARD` base units) |
+| Halving interval | ~4 years (63,072,000 blocks @ 2 s) |
+| Transaction fee | max(0.001 AGT, 0.01% of amount) |
+
+Halving follows a Bitcoin-style schedule: `reward = INITIAL_REWARD >> halving_count`.
+
+---
+
+## 7. Performance model
+
+```
+TPS_per_shard = MAX_TXS_PER_BLOCK / TARGET_BLOCK_TIME = 3000 / 2 = 1500
+```
+
+`bench_sharding` measures shard **assignment** speed only, not live transaction throughput. Real TPS benchmarks are a Phase 3 deliverable.
+
+---
+
+## 8. Roadmap
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| **0 — Foundation** | Tauri app, libp2p, mining loop, mempool, UI | ✅ Prototype |
+| **1 — Security** | Ed25519 tx signing, `validate_block`, fork choice, persist consensus | 🔲 Next |
+| **2 — PoP + Testnet** | Real VDF (fast verify), quarantine enforcement, public relays | 🔲 Planned |
+| **3 — Scale** | Per-shard state, cross-shard receipts, MPT, Block-STM | 🔲 Planned |
+| **4 — Mainnet** | Genesis ceremony, light client, audit, battle-testing | 🔲 Planned |
+
+Detailed tasks, technology references, and gap analysis:  
+**[docs/MASTER_VISION_AND_TECHNOLOGY_FA.md](docs/MASTER_VISION_AND_TECHNOLOGY_FA.md)**
+
+---
+
+## 9. Comparison
+
+| Feature | Centichain (target) | Bitcoin | Ethereum 2.0 | Solana |
+|---------|---------------------|---------|--------------|--------|
+| Scaling | Horizontal shards | L2 | L2 + rollup | Vertical HW |
+| Validator cost | Low (home PC) | High (ASIC) | Stake + server | High-end server |
+| Client simplicity | Wallet-only OK | Heavy full node | Light via RPC | RPC-heavy |
+| Supply cap | 21M AGT | 21M BTC | Uncapped ETH | Uncapped SOL |
+| ASIC resistance | Memory-hard PoP | No (ASIC wins) | N/A | N/A |
+
+---
+
+## 10. References
+
+- Nakamoto — [Bitcoin Whitepaper](https://bitcoin.org/bitcoin.pdf)
+- Boneh et al. — [Verifiable Delay Functions](https://eprint.iacr.org/2018/623)
+- Gelashvili et al. — [Block-STM (arXiv:2203.06871)](https://arxiv.org/abs/2203.06871)
+- libp2p — [github.com/libp2p/specs](https://github.com/libp2p/specs)
+- RFC 8032 (Ed25519), RFC 9106 (Argon2)
+
+---
+
+*Centichain — built for decentralized value storage at home-validator scale.*
