@@ -1,4 +1,3 @@
-pub mod api;
 pub mod chain;
 pub mod commands;
 pub mod consensus;

@@ -59,10 +59,8 @@
 
 **اسناد مرتبط در همین مخزن:**
 
-- [CENTICHAIN_WHITEPAPER.md](../CENTICHAIN_WHITEPAPER.md) — وایت‌پیپر انگلیسی
-- [ARCHITECTURE.md](../ARCHITECTURE.md) — معماری و state machine
-- [TECHNICAL_DOCUMENTATION_FA.md](./TECHNICAL_DOCUMENTATION_FA.md) — مستند فنی کدبیس
-- [CONNECT_FA.md](./CONNECT_FA.md) — اتصال RPC/API
+- [README.md](../README.md) — راه‌اندازی سریع و ساختار پروژه
+- [CENTICHAIN_WHITEPAPER.md](../CENTICHAIN_WHITEPAPER.md) — وایت‌پیپر انگلیسی (چشم‌انداز و roadmap)
 
 ---
 
@@ -172,7 +170,7 @@ Stopped → Connecting (Relay) → Discovering (DHT/mDNS)
          → Patience Mode → Queue → Leader (Mining)
 ```
 
-**رفرنس:** [ARCHITECTURE.md](../ARCHITECTURE.md) — بخش State Machine
+**رفرنس:** بخش ۳.۳ همین سند — State Machine
 
 ### ۳.۴ جریان داده تراکنش
 
@@ -423,7 +421,7 @@ centichain-status
 
 **رفرنس:** [Axum Docs](https://docs.rs/axum/latest/axum/)
 
-**سند اتصال:** [CONNECT_FA.md](./CONNECT_FA.md)
+**سند اتصال:** پیوست ج — RPC API در همین سند
 
 ---
 
@@ -960,7 +958,7 @@ fee = max(0.001 AGT, ceil(amount × 0.0001))
 |--------|-------|-----|
 | `centichain` | `npm run tauri dev` | اپ دسکتاپ کامل |
 | `rpc_node` | `cargo run --bin rpc_node` | API عمومی |
-| `relay_server` | `cargo run --bin relay_server` | Relay |
+| `relay_server` | `cargo run --bin relay_server` | Relay (تنها باینری relay) |
 | `bench_sharding` | `cargo run --bin bench_sharding` | بنچمارک shard assignment |
 
 ---
@@ -1040,7 +1038,7 @@ TPS_per_shard = MAX_TXS_PER_BLOCK / TARGET_BLOCK_TIME
 | 2.3 | Relay عمومی (۳+ VPS) | libp2p relay v2 |
 | 2.4 | Bootstrap peer list | — |
 | 2.5 | Testnet Alpha + faucet | — |
-| 2.6 | rpc_node validation کامل | CONNECT_FA.md |
+| 2.6 | rpc_node validation کامل | پیوست ج |
 | 2.7 | مستندات «نود در ۱۰ دقیقه» | — |
 
 **معیار:** ۱۰۰+ نود testnet، VDF solve < ۱۰ min
@@ -1170,13 +1168,9 @@ src-tauri/src/
 
 | سند | مسیر |
 |-----|------|
+| README | [README.md](../README.md) |
 | Whitepaper EN | [CENTICHAIN_WHITEPAPER.md](../CENTICHAIN_WHITEPAPER.md) |
-| Architecture | [ARCHITECTURE.md](../ARCHITECTURE.md) |
-| Technical FA | [TECHNICAL_DOCUMENTATION_FA.md](./TECHNICAL_DOCUMENTATION_FA.md) |
-| RPC Connect EN | [CONNECT.md](./CONNECT.md) |
-| RPC Connect FA | [CONNECT_FA.md](./CONNECT_FA.md) |
-| README EN | [README.md](../README.md) |
-| README FA | [README_FA.md](../README_FA.md) |
+| مرجع فنی FA | [MASTER_VISION_AND_TECHNOLOGY_FA.md](./MASTER_VISION_AND_TECHNOLOGY_FA.md) |
 
 ---
 
@@ -1270,7 +1264,48 @@ src-tauri/src/
 
 ---
 
-*این سند سند مرجع رسمی چشم‌انداز و فناوری Centichain است. با پیشرفت پیاده‌سازی، نسخه‌ها به‌روزرسانی می‌شوند.*
+## پیوست ج — RPC Node API
+
+برای اتصال صرافی، wallet وب، یا سرویس خارجی از باینری `rpc_node` استفاده کنید.
+
+### اجرا
+
+```bash
+cd src-tauri
+cargo run --release --bin rpc_node
+```
+
+| سرویس | آدرس |
+|-------|------|
+| REST API | `http://localhost:3000/api/v1` |
+| WebSocket | `ws://localhost:3000/ws` |
+| P2P | TCP `9091` |
+
+### Endpoints
+
+| Method | Path | توضیح |
+|--------|------|-------|
+| GET | `/status` | وضعیت نود (height, peers) |
+| GET | `/network/stats` | توکنومیکس و difficulty |
+| GET | `/balance/:address` | موجودی (base units) |
+| GET | `/blocks?page=&limit=` | لیست بلاک |
+| GET | `/transactions/:id` | جزئیات تراکنش |
+| POST | `/broadcast` | ارسال تراکنش امضا‌شده |
+
+### WebSocket events
+
+- `NewBlock` — بلاک جدید
+- `NewTransaction` — تراکنش جدید در mempool
+
+### نکات امنیتی
+
+- RPC کلید خصوصی تولید یا امضا **نمی‌کند**
+- تراکنش‌ها باید در سمت کلاینت امضا شوند (cold-wallet pattern)
+- اعتبارسنجی کامل signature در RPC — هدف فاز ۲
+
+---
+
+*این سند مرجع رسمی چشم‌انداز و فناوری Centichain است. با پیشرفت پیاده‌سازی، نسخه‌ها به‌روزرسانی می‌شوند.*
 
 **نگهدارنده:** تیم Centichain / Antigravity Chain  
 **بازبینی بعدی:** پس از تکمیل فاز ۱ امنیت
