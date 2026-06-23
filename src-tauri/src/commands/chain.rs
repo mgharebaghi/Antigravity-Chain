@@ -170,10 +170,9 @@ pub fn submit_transaction(
             consensus.get_assigned_shard(&wallet.address, 0)
         };
 
-        // Create Transaction
-        // In real app: Sign with Keypair
-        let tx = Transaction {
-            id: uuid::Uuid::new_v4().to_string(), // Need uuid crate or simple random
+        // Create and sign transaction
+        let mut tx = Transaction {
+            id: uuid::Uuid::new_v4().to_string(),
             sender: wallet.address.clone(),
             receiver,
             amount,
@@ -182,8 +181,12 @@ pub fn submit_transaction(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            signature: "sig".to_string(),
+            signature: String::new(),
+            sender_pubkey: String::new(),
         };
+
+        let keypair = wallet.get_keypair();
+        tx.sign_with_keypair(&keypair)?;
 
         state.mempool.add_transaction(tx.clone()).map_err(|e| e)?;
 

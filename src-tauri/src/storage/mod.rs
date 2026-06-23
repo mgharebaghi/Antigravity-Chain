@@ -7,6 +7,7 @@ const WALLET_TABLE: TableDefinition<&str, &str> = TableDefinition::new("wallet")
 const SETTINGS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("settings");
 const MEMPOOL_TABLE: TableDefinition<&str, &str> = TableDefinition::new("mempool");
 const STATE_TABLE: TableDefinition<&str, u64> = TableDefinition::new("state");
+const TX_INDEX_TABLE: TableDefinition<&str, u64> = TableDefinition::new("tx_index");
 
 pub struct Storage {
     db: Arc<Database>,
@@ -22,6 +23,7 @@ impl Storage {
             let _ = write_txn.open_table(SETTINGS_TABLE)?;
             let _ = write_txn.open_table(MEMPOOL_TABLE)?;
             let _ = write_txn.open_table(STATE_TABLE)?;
+            let _ = write_txn.open_table(TX_INDEX_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -33,9 +35,14 @@ impl Storage {
         {
             let mut blocks_table = write_txn.open_table(BLOCKS_TABLE)?;
             let mut state_table = write_txn.open_table(STATE_TABLE)?;
+            let mut tx_index = write_txn.open_table(TX_INDEX_TABLE)?;
 
             let json = serde_json::to_string(block)?;
             blocks_table.insert(block.index, json.as_str())?;
+
+            for tx in &block.transactions {
+                tx_index.insert(tx.id.as_str(), block.index)?;
+            }
 
             // Update state based on transactions
             for tx in &block.transactions {
@@ -234,6 +241,21 @@ impl Storage {
         &self,
         tx_id: &str,
     ) -> Result<Option<(crate::chain::Transaction, Block)>, anyhow::Error> {
+        let indexed_block = {
+            let read_txn = self.db.begin_read()?;
+            let tx_index = read_txn.open_table(TX_INDEX_TABLE)?;
+            let entry = tx_index.get(tx_id)?;
+            entry.map(|guard| guard.value())
+        };
+
+        if let Some(idx) = indexed_block {
+            if let Some(block) = self.get_block(idx)? {
+                if let Some(tx) = block.transactions.iter().find(|t| t.id == tx_id) {
+                    return Ok(Some((tx.clone(), block)));
+                }
+            }
+        }
+
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(BLOCKS_TABLE)?;
         let iter = table.iter()?;
@@ -245,6 +267,42 @@ impl Storage {
             }
         }
         Ok(None)
+    }
+
+    pub fn is_tx_mined(&self, tx_id: &str) -> Result<bool, anyhow::Error> {
+        let read_txn = self.db.begin_read()?;
+        let tx_index = read_txn.open_table(TX_INDEX_TABLE)?;
+        let found = tx_index.get(tx_id)?.is_some();
+        Ok(found)
+    }
+
+    pub fn save_consensus_nodes(
+        &self,
+        nodes: &std::collections::HashMap<String, crate::consensus::NodeState>,
+    ) -> Result<(), anyhow::Error> {
+        let json = serde_json::to_string(nodes)?;
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(SETTINGS_TABLE)?;
+            table.insert("consensus_nodes", json.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn load_consensus_nodes(
+        &self,
+    ) -> Result<std::collections::HashMap<String, crate::consensus::NodeState>, anyhow::Error> {
+        let json = {
+            let read_txn = self.db.begin_read()?;
+            let table = read_txn.open_table(SETTINGS_TABLE)?;
+            let entry = table.get("consensus_nodes")?;
+            entry.map(|guard| guard.value().to_string())
+        };
+        match json {
+            Some(s) => Ok(serde_json::from_str(&s)?),
+            None => Ok(std::collections::HashMap::new()),
+        }
     }
 
     pub fn save_setting(&self, key: &str, value: &str) -> Result<(), anyhow::Error> {
@@ -326,6 +384,15 @@ impl Storage {
                 .collect();
             for k in mem_keys {
                 mempool_table.remove(k.as_str())?;
+            }
+
+            let mut tx_index = write_txn.open_table(TX_INDEX_TABLE)?;
+            let tx_keys: Vec<String> = tx_index
+                .iter()?
+                .map(|i| i.unwrap().0.value().to_string())
+                .collect();
+            for k in tx_keys {
+                tx_index.remove(k.as_str())?;
             }
         }
         write_txn.commit()?;

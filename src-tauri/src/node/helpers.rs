@@ -2,7 +2,7 @@
 //!
 //! Helper functions for block production in the mining loop.
 
-use crate::chain;
+use crate::chain::{self, SYSTEM_SIG_GENESIS, SYSTEM_SIG_REWARD};
 use crate::consensus::Consensus;
 use crate::storage::Storage;
 use std::sync::{Arc, Mutex};
@@ -47,7 +47,8 @@ pub fn create_coinbase_tx(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            signature: "genesis".to_string(),
+            signature: SYSTEM_SIG_GENESIS.to_string(),
+            sender_pubkey: String::new(),
         }
     } else {
         chain::Transaction {
@@ -60,7 +61,8 @@ pub fn create_coinbase_tx(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            signature: "reward".to_string(),
+            signature: SYSTEM_SIG_REWARD.to_string(),
+            sender_pubkey: String::new(),
         }
     }
 }

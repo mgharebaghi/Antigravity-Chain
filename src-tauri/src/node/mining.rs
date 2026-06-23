@@ -10,7 +10,7 @@
 //! IMPORTANT: This loop is designed to be non-blocking and yield-friendly
 //! to allow P2P and VDF operations to run concurrently.
 
-use crate::chain;
+use crate::chain::{ingest_block, BlockAcceptResult};
 use crate::consensus::mempool::Mempool;
 use crate::consensus::vdf::CentichainVDF;
 use crate::consensus::Consensus;
@@ -347,7 +347,7 @@ async fn block_production_loop(
         };
 
         // Create block
-        let mut new_block = chain::Block::new(
+        let mut new_block = crate::chain::Block::new(
             target_idx,
             current_wallet_addr.clone(),
             block_txs,
@@ -370,10 +370,13 @@ async fn block_production_loop(
         // Slash missed slots
         slash_missed_slots(&storage, &consensus, target_idx, &new_block, my_shard);
 
-        // Save block
-        if let Err(e) = storage.save_block(&new_block) {
-            log::error!("Failed to save block: {}", e);
-            continue;
+        // Validate and save block (Phase 1 security)
+        match ingest_block(&storage, &mempool, &consensus, &new_block, false) {
+            BlockAcceptResult::Accepted => {}
+            other => {
+                log::error!("Mining Loop: Block {} not accepted: {:?}", target_idx, other);
+                continue;
+            }
         }
 
         // Pruning
@@ -390,10 +393,6 @@ async fn block_production_loop(
         if let Err(e) = block_sender.send(Box::new(new_block)).await {
             log::error!("Failed to broadcast block: {}", e);
         }
-
-        // Remove mined transactions from mempool
-        let tx_ids: Vec<String> = pending_txs.iter().map(|tx| tx.id.clone()).collect();
-        mempool.remove_transactions(&tx_ids);
 
         log::info!("Mining Loop: Block {} produced and broadcast", target_idx);
     }

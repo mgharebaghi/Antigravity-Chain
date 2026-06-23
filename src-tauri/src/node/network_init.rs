@@ -2,7 +2,7 @@
 //!
 //! Handles Phase 2 of the mining loop: network discovery and synchronization.
 
-use crate::chain::{self, Transaction};
+use crate::chain::{self, try_accept_block, BlockAcceptResult, Transaction, SYSTEM_SIG_GENESIS};
 use crate::consensus::vdf::CentichainVDF;
 use crate::consensus::Consensus;
 use crate::storage::Storage;
@@ -275,7 +275,8 @@ pub async fn create_genesis_block(
         amount: crate::utils::constants::GENESIS_SUPPLY,
         shard_id: 0,
         timestamp: 0,
-        signature: "genesis".to_string(),
+        signature: SYSTEM_SIG_GENESIS.to_string(),
+        sender_pubkey: String::new(),
     };
 
     let mut genesis_block = chain::Block::new(
@@ -297,10 +298,21 @@ pub async fn create_genesis_block(
     genesis_block.hash = genesis_block.calculate_hash();
     genesis_block.size = genesis_block.calculate_size();
 
-    // Save genesis
-    if let Err(e) = storage.save_block(&genesis_block) {
-        log::error!("Failed to save genesis block: {}", e);
-        return;
+    // Save genesis (validated — local bootstrap)
+    let accept_result = {
+        let c = consensus.lock().unwrap();
+        try_accept_block(storage, &genesis_block, Some(&c), true)
+    };
+    match accept_result {
+        Ok(BlockAcceptResult::Accepted) | Ok(BlockAcceptResult::Duplicate) => {}
+        Ok(other) => {
+            log::error!("Genesis block rejected: {:?}", other);
+            return;
+        }
+        Err(e) => {
+            log::error!("Failed to save genesis block: {}", e);
+            return;
+        }
     }
 
     chain_index.store(0, Ordering::Relaxed);
@@ -311,6 +323,7 @@ pub async fn create_genesis_block(
     {
         let mut c = consensus.lock().unwrap();
         c.force_activate_local();
+        c.persist_to_storage(storage);
     }
 
     is_synced.store(true, Ordering::Relaxed);

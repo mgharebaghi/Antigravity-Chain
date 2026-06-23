@@ -229,34 +229,20 @@ impl Consensus {
         Some(eligible_validators[index].clone())
     }
 
-    /// Automatically activates a peer who authored a valid block.
-    ///
-    /// When we receive a valid block from a peer, we trust they went through
-    /// proper verification on other nodes. This ensures new joiners correctly
-    /// recognize existing chain authors as active validators.
-    pub fn mark_peer_active(&mut self, peer_id: String) {
-        if let Some(node) = self.nodes.get_mut(&peer_id) {
-            if node.activated_at.is_none() {
-                log::info!(
-                    "Consensus: Peer {} authored valid block - granting active status",
-                    peer_id
-                );
-                node.activate();
-                node.is_verified = true;
-                node.trust_score = (node.trust_score * 1.05).min(1.0);
-            }
-        } else {
-            // Unknown peer authored a block - register and activate
-            let mut node = NodeState::new(peer_id.clone());
-            node.activate();
-            node.is_verified = true;
-            node.trust_score = 1.0;
-            self.nodes.insert(peer_id.clone(), node);
+    /// Registers a peer who produced a valid block — does NOT bypass PoP quarantine.
+    pub fn register_block_author(&mut self, peer_id: String) {
+        if !self.nodes.contains_key(&peer_id) {
             log::info!(
-                "Consensus: New peer {} registered and activated via block authorship",
+                "Consensus: Registering block author {} (PoP still required)",
                 peer_id
             );
+            self.nodes.insert(peer_id.clone(), NodeState::new(peer_id));
         }
+    }
+
+    /// @deprecated Phase 1 — block authorship no longer grants activation.
+    pub fn mark_peer_active(&mut self, peer_id: String) {
+        self.register_block_author(peer_id);
     }
 
     /// Identify and slash leaders who missed their slots between two blocks.

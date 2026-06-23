@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Represents the state of a validator node in the network.
 /// Once a node is activated (via VDF proof + quarantine), it remains eligible
 /// for leadership unless explicitly slashed below the trust threshold.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeState {
     /// Unique identifier for the peer
     pub peer_id: String,

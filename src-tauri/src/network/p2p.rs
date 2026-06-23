@@ -15,7 +15,7 @@ use tokio::io;
 
 use tauri::{AppHandle, Emitter};
 
-use crate::chain::{Block, SyncRequest, SyncResponse, Transaction};
+use crate::chain::{ingest_block, Block, BlockAcceptResult, SyncRequest, SyncResponse, Transaction};
 use crate::consensus::mempool::Mempool;
 use crate::consensus::Consensus;
 use crate::storage::Storage;
@@ -926,19 +926,30 @@ fn handle_gossip_message(
     if message.topic.as_str() == topics.shard_blocks.hash().as_str() {
         if let Ok(block) = serde_json::from_slice::<Block>(&message.data) {
             log::info!("Received Gossip Block #{} from {}", block.index, peer_id);
-            if storage.save_block(&block).is_ok() {
-                consensus
-                    .lock()
-                    .unwrap()
-                    .mark_peer_active(block.author.clone());
-                chain_index.store(block.index, Ordering::Relaxed);
-                let _ = app_handle.emit("new-block", block);
+            match ingest_block(storage, mempool, consensus, &block, false) {
+                BlockAcceptResult::Accepted => {
+                    chain_index.store(block.index, Ordering::Relaxed);
+                    let _ = app_handle.emit("new-block", block);
+                }
+                BlockAcceptResult::Duplicate => {}
+                BlockAcceptResult::NeedsSync { missing_from } => {
+                    log::info!(
+                        "Block #{} needs sync from height {}",
+                        block.index, missing_from
+                    );
+                }
+                BlockAcceptResult::Rejected(reason) => {
+                    log::warn!("Rejected gossip block #{}: {}", block.index, reason);
+                }
             }
         }
     } else if message.topic.as_str() == topics.shard_txs.hash().as_str() {
         if let Ok(tx) = serde_json::from_slice::<Transaction>(&message.data) {
-            let _ = mempool.add_transaction(tx.clone());
-            let _ = app_handle.emit("new-transaction", tx);
+            if let Err(e) = mempool.add_transaction(tx.clone()) {
+                log::debug!("Rejected gossip tx {}: {}", tx.id, e);
+            } else {
+                let _ = app_handle.emit("new-transaction", tx);
+            }
         }
     } else if message.topic.as_str() == topics.vdf_proofs.hash().as_str() {
         if let Ok(msg) = serde_json::from_slice::<crate::chain::VdfProofMessage>(&message.data) {
@@ -949,6 +960,7 @@ fn handle_gossip_message(
                     "Verified peer {} via VDF! Trust Score set to 1.0",
                     msg.peer_id
                 );
+                c.persist_to_storage(storage);
                 let _ = app_handle.emit("peer-update", msg.peer_id);
             } else {
                 log::warn!("Invalid VDF Proof from {}", msg.peer_id);
@@ -1116,14 +1128,17 @@ fn handle_sync_message(
                 for block in blocks {
                     last_idx = block.index;
                     log::info!("P2P Sync: Batch Received Block #{}", block.index);
-                    if storage.get_block(block.index).unwrap_or(None).is_none() {
-                        if storage.save_block(&block).is_ok() {
-                            consensus
-                                .lock()
-                                .unwrap()
-                                .mark_peer_active(block.author.clone());
+                    match ingest_block(storage, mempool, consensus, &block, false) {
+                        BlockAcceptResult::Accepted => {
                             chain_index.store(block.index, Ordering::Relaxed);
                             let _ = app_handle.emit("new-block", block);
+                        }
+                        BlockAcceptResult::Duplicate => {}
+                        BlockAcceptResult::NeedsSync { .. } => {
+                            log::warn!("Sync batch out of order at block #{}", block.index);
+                        }
+                        BlockAcceptResult::Rejected(reason) => {
+                            log::warn!("Sync rejected block #{}: {}", block.index, reason);
                         }
                     }
                 }
@@ -1138,12 +1153,8 @@ fn handle_sync_message(
             }
             SyncResponse::Block(Some(block)) => {
                 log::info!("P2P Sync: Received Block #{}", block.index);
-                if storage.get_block(block.index).unwrap_or(None).is_none() {
-                    if storage.save_block(&block).is_ok() {
-                        consensus
-                            .lock()
-                            .unwrap()
-                            .mark_peer_active(block.author.clone());
+                match ingest_block(storage, mempool, consensus, &block, false) {
+                    BlockAcceptResult::Accepted => {
                         chain_index.store(block.index, Ordering::Relaxed);
                         let _ = app_handle.emit("new-block", block.clone());
                         let _ = app_handle
@@ -1163,6 +1174,13 @@ fn handle_sync_message(
                                 .sync
                                 .send_request(&peer, SyncRequest::GetHeight);
                         }
+                    }
+                    BlockAcceptResult::Duplicate => {}
+                    BlockAcceptResult::NeedsSync { missing_from } => {
+                        log::info!("Sync needs blocks from {}", missing_from);
+                    }
+                    BlockAcceptResult::Rejected(reason) => {
+                        log::warn!("Sync rejected block #{}: {}", block.index, reason);
                     }
                 }
             }

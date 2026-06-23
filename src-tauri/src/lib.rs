@@ -88,10 +88,13 @@ pub fn run() {
         None
     };
 
+    let mut initial_consensus = Consensus::new();
+    initial_consensus.load_from_storage(&storage_arc);
+
     tauri::Builder::default()
         .manage(AppState {
             wallet: Arc::new(Mutex::new(initial_wallet)),
-            consensus: Arc::new(Mutex::new(Consensus::new())),
+            consensus: Arc::new(Mutex::new(initial_consensus)),
             storage: storage_arc.clone(),
             mempool: {
                 let m = Mempool::new(storage_arc.clone());

@@ -62,6 +62,7 @@ mod tests {
             shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
+            sender_pubkey: String::new(),
         };
         let root = calculate_merkle_root(&[tx]);
         let mut hasher = Sha256::new();
@@ -80,6 +81,7 @@ mod tests {
             shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
+            sender_pubkey: String::new(),
         };
         let tx2 = Transaction {
             id: "tx2".to_string(),
@@ -89,6 +91,7 @@ mod tests {
             shard_id: 0,
             timestamp: 0,
             signature: "s".to_string(),
+            sender_pubkey: String::new(),
         };
 
         let root = calculate_merkle_root(&[tx1, tx2]);

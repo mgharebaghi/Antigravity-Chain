@@ -191,6 +191,37 @@ impl Default for Consensus {
     }
 }
 
+impl Consensus {
+    /// Persisted snapshot of validator states (excluding ephemeral locks).
+    pub fn export_nodes(&self) -> std::collections::HashMap<String, NodeState> {
+        self.nodes.clone()
+    }
+
+    /// Restores validator states from disk (e.g. after app restart).
+    pub fn import_nodes(&mut self, nodes: std::collections::HashMap<String, NodeState>) {
+        self.nodes = nodes;
+    }
+
+    /// Saves nodes to storage; call after activation / slashing / verify.
+    pub fn persist_to_storage(&self, storage: &crate::storage::Storage) {
+        if let Err(e) = storage.save_consensus_nodes(&self.nodes) {
+            log::warn!("Failed to persist consensus nodes: {}", e);
+        }
+    }
+
+    /// Loads nodes from storage into this consensus instance.
+    pub fn load_from_storage(&mut self, storage: &crate::storage::Storage) {
+        match storage.load_consensus_nodes() {
+            Ok(nodes) if !nodes.is_empty() => {
+                log::info!("Loaded {} consensus node states from storage", nodes.len());
+                self.import_nodes(nodes);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("Could not load consensus nodes: {}", e),
+        }
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -331,11 +362,10 @@ mod tests {
     }
 
     #[test]
-    fn test_implicit_activation() {
+    fn test_block_author_registration_only() {
         let mut consensus = Consensus::new();
         let peer_id = "new_joiner".to_string();
 
-        // Node joins
         consensus.register_node(peer_id.clone());
         assert!(consensus
             .nodes
@@ -344,17 +374,12 @@ mod tests {
             .activated_at
             .is_none());
 
-        // Produces valid block (simulated reception)
-        consensus.mark_peer_active(peer_id.clone());
+        consensus.register_block_author(peer_id.clone());
 
-        assert!(consensus.nodes.get(&peer_id).unwrap().is_active);
-        assert!(consensus.nodes.get(&peer_id).unwrap().is_verified);
-        assert!(consensus
-            .nodes
-            .get(&peer_id)
-            .unwrap()
-            .activated_at
-            .is_some());
+        let node = consensus.nodes.get(&peer_id).unwrap();
+        assert!(!node.is_active);
+        assert!(!node.is_verified);
+        assert!(node.activated_at.is_none());
     }
 
     #[test]
