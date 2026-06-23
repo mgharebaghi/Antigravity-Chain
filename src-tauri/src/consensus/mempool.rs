@@ -1,4 +1,4 @@
-use crate::chain::Transaction;
+use crate::chain::{validate_transaction, Transaction};
 use crate::storage::Storage;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,32 +63,19 @@ impl Mempool {
     }
 
     fn is_tx_mined(&self, tx_id: &str) -> Result<bool, anyhow::Error> {
-        // Simple scan for now.
-        // In a real app, storage should have a TxIndex.
-        let chain_height = {
-            // We need current height.
-            // Since we don't have it easily here without more complexity,
-            // let's look at all blocks in storage.
-            1000000 // Placeholder for "all blocks"
-        };
-
-        // Actually, let's use a more efficient way if possible.
-        // For now, iterate blocks.
-        for i in 0..chain_height {
-            match self.storage.get_block(i as u64) {
-                Ok(Some(block)) => {
-                    if block.transactions.iter().any(|tx| tx.id == tx_id) {
-                        return Ok(true);
-                    }
-                }
-                Ok(None) => break, // End of chain
-                Err(_) => break,
-            }
-        }
-        Ok(false)
+        self.storage.is_tx_mined(tx_id)
     }
 
     pub fn add_transaction(&self, tx: Transaction) -> Result<(), String> {
+        if tx.is_system() {
+            return Err("SYSTEM transactions cannot enter the mempool".into());
+        }
+
+        tx.validate()?;
+
+        let pending_spend = self.get_total_pending_spend(&tx.sender);
+        validate_transaction(&tx, &self.storage, pending_spend)?;
+
         let mut pool = self.pending_txs.lock().unwrap();
         if pool.contains_key(&tx.id) {
             return Err("Transaction already in mempool".to_string());
